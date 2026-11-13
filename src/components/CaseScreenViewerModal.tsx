@@ -14,6 +14,8 @@ import {
   XCircle,
   AlertTriangle,
   Database,
+  CreditCard,
+  Lightbulb,
 } from 'lucide-react';
 import { CaseSession } from '../types/forensic';
 import { formatCurrency } from '../utils/entities';
@@ -29,13 +31,18 @@ export const CaseScreenViewerModal: React.FC<Props> = ({
   onClose,
   onLoadIntoWorkspace,
 }) => {
-  const [activeTab, setActiveTab] = useState<'resumen' | 'documentos' | 'observaciones' | 'codigo' | 'trazabilidad'>('resumen');
+  const [activeTab, setActiveTab] = useState<
+    'resumen' | 'documentos' | 'observaciones' | 'codigo' | 'trazabilidad'
+  >('resumen');
 
   if (!caseData) return null;
 
   const currency = caseData.entity?.simboloMoneda || 'RD$';
   const obsList = caseData.observaciones || caseData.resultado?.observacionesDecididas || [];
   const contracts = caseData.contractRows || [];
+  const payments = caseData.paymentCycleRows || [];
+  const directorsList = caseData.directors || [];
+  const contraReplicasList = caseData.contraReplicas || [];
   const logs = caseData.traceabilityLogs || [];
 
   return (
@@ -66,7 +73,7 @@ export const CaseScreenViewerModal: React.FC<Props> = ({
                 </span>
               </div>
               <p className="text-xs text-slate-400 mt-0.5">
-                Entidad: <strong className="text-slate-200">{caseData.entity?.nombre || 'Entidad Auditada'}</strong> •
+                Entidad Exclusiva: <strong className="text-slate-200">{caseData.entity?.nombre || 'Entidad Auditada'}</strong> •
                 Registrado: {new Date(caseData.timestamp).toLocaleString('es-DO')}
               </p>
             </div>
@@ -98,11 +105,11 @@ export const CaseScreenViewerModal: React.FC<Props> = ({
           </div>
         </div>
 
-        {/* Navigation Tabs */}
+        {/* Tabs */}
         <div className="flex overflow-x-auto border-b border-slate-800 bg-slate-900/70 px-6 pt-2.5 gap-2 shrink-0">
           {[
-            { id: 'resumen', label: '1. Ficha General & Dictamen' },
-            { id: 'documentos', label: `2. Documentos & Matriz (${contracts.length})` },
+            { id: 'resumen', label: '1. Ficha General, Dictamen & Mejoras' },
+            { id: 'documentos', label: `2. Evidencia, Contratos (${contracts.length}) & Pagos (${payments.length})` },
             { id: 'observaciones', label: `3. Observaciones (${obsList.length})` },
             { id: 'codigo', label: '4. Algoritmo Python IA' },
             { id: 'trazabilidad', label: `5. Trazabilidad (${logs.length})` },
@@ -123,7 +130,6 @@ export const CaseScreenViewerModal: React.FC<Props> = ({
 
         {/* Body */}
         <div className="p-6 overflow-y-auto flex-1 space-y-5 bg-slate-950/50">
-          {/* Tab 1: Resumen & Dictamen */}
           {activeTab === 'resumen' && (
             <div className="space-y-5">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -135,7 +141,7 @@ export const CaseScreenViewerModal: React.FC<Props> = ({
                     {caseData.entity?.nombre || 'No especificada'}
                   </div>
                   <div className="text-xs text-slate-400 font-mono">
-                    RNC/NIF: {caseData.entity?.rncNif || 'N/D'} • Sector: {caseData.entity?.sector || 'Público'}
+                    RNC/NIF: {caseData.entity?.rncNif || 'N/D'} • Sector: {caseData.entity?.sector || 'N/D'}
                   </div>
                 </div>
 
@@ -159,7 +165,7 @@ export const CaseScreenViewerModal: React.FC<Props> = ({
                     {caseData.selloDigital}
                   </div>
                   <div className="text-[11px] text-slate-400">
-                    Período: {caseData.periodo?.fechaDesde || '2024-01-01'} al {caseData.periodo?.fechaHasta || '2024-12-31'}
+                    Período: {caseData.periodo?.fechaDesde || 'N/D'} al {caseData.periodo?.fechaHasta || 'N/D'}
                   </div>
                 </div>
               </div>
@@ -204,6 +210,19 @@ export const CaseScreenViewerModal: React.FC<Props> = ({
                       </ul>
                     </div>
                   )}
+                  {caseData.resultado.mejorasControlInterno &&
+                    caseData.resultado.mejorasControlInterno.length > 0 && (
+                      <div className="space-y-1.5 bg-emerald-950/20 border border-emerald-800/30 rounded-lg p-3">
+                        <div className="text-xs font-semibold text-emerald-300 flex items-center gap-1.5">
+                          <Lightbulb className="w-4 h-4" /> Mejoras Recomendadas de Control Interno IA:
+                        </div>
+                        <ul className="list-disc list-inside text-xs text-slate-300 space-y-1">
+                          {caseData.resultado.mejorasControlInterno.map((m, idx) => (
+                            <li key={idx}>{m}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
                   <div className="text-xs text-sky-300 bg-slate-950 p-3 rounded-lg border border-slate-800">
                     <strong>Fundamento Legal: </strong>
                     {caseData.resultado.fundamentoLegal}
@@ -211,18 +230,17 @@ export const CaseScreenViewerModal: React.FC<Props> = ({
                 </div>
               ) : (
                 <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 text-center text-xs text-slate-400">
-                  Este caso aún no tiene un dictamen IA ejecutado. Cárgalo en el espacio de trabajo y pulsa &quot;Ejecutar Análisis Multimodelo IA&quot;.
+                  Este caso aún no tiene un dictamen IA ejecutado. Cárgalo en el espacio de trabajo y ejecuta el análisis en el Paso 5.
                 </div>
               )}
             </div>
           )}
 
-          {/* Tab 2: Documentos Extraídos & Matriz */}
           {activeTab === 'documentos' && (
             <div className="space-y-5">
               {caseData.evidenceFile && (
                 <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
                     <h3 className="text-sm font-bold text-white flex items-center gap-2">
                       <FileText className="w-4 h-4 text-sky-400" />
                       Evidencia Digital Principal: {caseData.evidenceFile.name}
@@ -231,6 +249,11 @@ export const CaseScreenViewerModal: React.FC<Props> = ({
                       {caseData.evidenceFile.parsedFormat || 'DIGITAL'}
                     </span>
                   </div>
+                  {caseData.evidenceFile.sourceUrl && (
+                    <div className="text-xs font-mono text-sky-400 break-all">
+                      Enlace Origen: {caseData.evidenceFile.sourceUrl}
+                    </div>
+                  )}
                   {caseData.evidenceFile.extractedText && (
                     <pre className="bg-slate-950 border border-slate-800 rounded-lg p-4 text-xs font-mono text-slate-300 whitespace-pre-wrap max-h-64 overflow-y-auto">
                       {caseData.evidenceFile.extractedText}
@@ -243,7 +266,7 @@ export const CaseScreenViewerModal: React.FC<Props> = ({
                 <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3">
                   <h3 className="text-sm font-bold text-white flex items-center gap-2">
                     <Database className="w-4 h-4 text-emerald-400" />
-                    Matriz Contractual Registrada ({contracts.length} registros)
+                    Matriz Contractual Registrada ({contracts.length})
                   </h3>
                   <div className="overflow-x-auto rounded-lg border border-slate-800">
                     <table className="w-full text-left text-xs text-slate-300">
@@ -274,29 +297,116 @@ export const CaseScreenViewerModal: React.FC<Props> = ({
                 </div>
               )}
 
-              {/* Dossier Contradictorio Resumen */}
+              {payments.length > 0 && (
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3">
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <CreditCard className="w-4 h-4 text-sky-400" />
+                    Ciclo de Pagos Registrado ({payments.length} desembolsos)
+                  </h3>
+                  <div className="overflow-x-auto rounded-lg border border-slate-800">
+                    <table className="w-full text-left text-xs text-slate-300">
+                      <thead className="bg-slate-950 text-slate-400 uppercase font-mono text-[10px]">
+                        <tr>
+                          <th className="py-2 px-3">Orden / Contrato</th>
+                          <th className="py-2 px-3">Beneficiario</th>
+                          <th className="py-2 px-3">e-CF / Libramiento</th>
+                          <th className="py-2 px-3 text-right">Facturado</th>
+                          <th className="py-2 px-3 text-right">Neto Pagado</th>
+                          <th className="py-2 px-3">Estado Ciclo</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800">
+                        {payments.map((p) => (
+                          <tr key={p.id}>
+                            <td className="py-2 px-3 font-mono">{p.ordenNumero} / {p.contratoId}</td>
+                            <td className="py-2 px-3">{p.beneficiario}</td>
+                            <td className="py-2 px-3 font-mono text-[11px]">
+                              {p.numeroFacturaEcf || 'N/D'} • {p.numeroLibramientoPago || 'N/D'}
+                            </td>
+                            <td className="py-2 px-3 text-right font-mono">{formatCurrency(p.montoFacturado, currency)}</td>
+                            <td className="py-2 px-3 text-right font-mono text-emerald-400">{formatCurrency(p.montoPagadoNeto, currency)}</td>
+                            <td className="py-2 px-3 font-mono text-[11px]">{p.estadoCiclo}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {caseData.actaLectura && (
+                {caseData.actaLectura?.contenido && (
                   <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-1.5">
                     <div className="text-xs font-bold text-sky-300">1. {caseData.actaLectura.titulo}</div>
                     <p className="text-xs text-slate-300 leading-relaxed">{caseData.actaLectura.contenido}</p>
                   </div>
                 )}
-                {caseData.informePreliminar && (
+                {caseData.informePreliminar?.contenido && (
                   <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-1.5">
                     <div className="text-xs font-bold text-red-300">3. {caseData.informePreliminar.titulo}</div>
                     <p className="text-xs text-slate-300 leading-relaxed">{caseData.informePreliminar.contenido}</p>
                   </div>
                 )}
               </div>
+
+              {directorsList.length > 0 && (
+                <div className="bg-slate-900 border border-indigo-800/40 rounded-xl p-5 space-y-3">
+                  <h3 className="text-sm font-bold text-indigo-300">
+                    Directores y Decretos Oficiales de Nombramiento ({directorsList.length})
+                  </h3>
+                  <div className="space-y-2">
+                    {directorsList.map((d) => (
+                      <div key={d.id} className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs space-y-1">
+                        <div className="flex justify-between gap-2 flex-wrap">
+                          <strong className="text-white">{d.nombre} ({d.cargo})</strong>
+                          <span className="font-mono text-amber-300">{d.numeroDecretoNombramiento}</span>
+                        </div>
+                        <div className="text-slate-400 font-mono text-[11px]">
+                          Período: {d.fechaInicioGestion || 'N/D'} a {d.enFuncionesActuales ? 'Actualidad' : d.fechaFinGestion || 'N/D'}
+                        </div>
+                        {d.fuentes?.map((f) => (
+                          <div key={f.id} className="text-[11px] text-sky-400 break-all">
+                            Origen: {f.ubicacionOrigen} {f.url ? `• ${f.url}` : ''}
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {contraReplicasList.length > 0 && (
+                <div className="bg-slate-900 border border-purple-800/40 rounded-xl p-5 space-y-2.5">
+                  <h3 className="text-sm font-bold text-purple-300">
+                    Contra-Réplicas Multi-Período ({contraReplicasList.length})
+                  </h3>
+                  {contraReplicasList.map((cr) => (
+                    <div key={cr.id} className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs space-y-1">
+                      <div className="flex justify-between gap-2 flex-wrap">
+                        <strong className="text-white">{cr.titulo}</strong>
+                        <span className="text-[11px] font-mono text-purple-300">
+                          {cr.periodoEtiqueta || cr.fecha} • {cr.directorNombre || 'General'}
+                        </span>
+                      </div>
+                      <p className="text-slate-300 leading-relaxed">{cr.contenido}</p>
+                      {(cr.fuenteOrigen || cr.urlOrigen) && (
+                        <div className="text-[10.5px] font-mono text-sky-400 break-all">
+                          Fuente: {cr.fuenteOrigen || ''} {cr.urlOrigen ? `(${cr.urlOrigen})` : ''}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
-          {/* Tab 3: Observaciones Contradictorias */}
           {activeTab === 'observaciones' && (
             <div className="space-y-3">
               {obsList.length === 0 ? (
-                <div className="text-center py-8 text-xs text-slate-400">No hay observaciones registradas en este caso.</div>
+                <div className="text-center py-8 text-xs text-slate-400">
+                  No hay observaciones registradas en este caso.
+                </div>
               ) : (
                 obsList.map((o) => (
                   <div key={o.id} className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-2 text-xs">
@@ -319,7 +429,6 @@ export const CaseScreenViewerModal: React.FC<Props> = ({
             </div>
           )}
 
-          {/* Tab 4: Algoritmo Python */}
           {activeTab === 'codigo' && (
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3">
               <div className="text-xs font-bold text-emerald-400 flex items-center gap-2">
@@ -332,23 +441,26 @@ export const CaseScreenViewerModal: React.FC<Props> = ({
             </div>
           )}
 
-          {/* Tab 5: Trazabilidad */}
           {activeTab === 'trazabilidad' && (
             <div className="space-y-2.5">
-              {logs.map((l) => (
-                <div key={l.id} className="bg-slate-900 border border-slate-800 rounded-lg p-3 text-xs space-y-1">
-                  <div className="flex justify-between">
-                    <strong className="text-white">{l.accion}</strong>
-                    <span className="font-mono text-slate-500 flex items-center gap-1">
-                      <Clock className="w-3 h-3" /> {l.timestamp}
-                    </span>
+              {logs.length === 0 ? (
+                <div className="text-center py-8 text-xs text-slate-400">Sin eventos de trazabilidad registrados aún.</div>
+              ) : (
+                logs.map((l) => (
+                  <div key={l.id} className="bg-slate-900 border border-slate-800 rounded-lg p-3 text-xs space-y-1">
+                    <div className="flex justify-between">
+                      <strong className="text-white">{l.accion}</strong>
+                      <span className="font-mono text-slate-500 flex items-center gap-1">
+                        <Clock className="w-3 h-3" /> {l.timestamp}
+                      </span>
+                    </div>
+                    <p className="text-slate-300">{l.detalle}</p>
+                    <div className="text-[10px] font-mono text-teal-400">
+                      Usuario: {l.usuario} • Hash: {l.sha256}
+                    </div>
                   </div>
-                  <p className="text-slate-300">{l.detalle}</p>
-                  <div className="text-[10px] font-mono text-teal-400">
-                    Usuario: {l.usuario} • Hash: {l.sha256}
-                  </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
           )}
         </div>

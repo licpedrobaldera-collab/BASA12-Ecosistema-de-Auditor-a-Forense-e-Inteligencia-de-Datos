@@ -8,7 +8,9 @@ export interface AuditedEntity {
   moneda: string;
   simboloMoneda: string;
   descripcion?: string;
+  urlPortal?: string;
   creadaEn?: string;
+  actualizadaEn?: string;
 }
 
 export interface EvidenceFile {
@@ -17,6 +19,8 @@ export interface EvidenceFile {
   type: string;
   sha256: string;
   uploadDate: string;
+  sourceType?: 'ARCHIVO' | 'URL_PORTAL' | 'TEXTO_DIRECTO';
+  sourceUrl?: string;
   contentSnippet?: string;
   extractedText?: string;
   extractedRows?: Record<string, any>[];
@@ -25,6 +29,7 @@ export interface EvidenceFile {
   sheetNames?: string[];
   pageCount?: number;
   recordCount?: number;
+  discoveredLinks?: { label: string; url: string }[];
 }
 
 export interface ContractEvidenceRow {
@@ -41,6 +46,34 @@ export interface ContractEvidenceRow {
   objeto: string;
   esAnomalo: boolean;
   motivoAlerta: string;
+}
+
+export interface PaymentCycleRow {
+  id: string;
+  ordenNumero: string;
+  contratoId: string;
+  beneficiario: string;
+  rnc: string;
+  fechaSolicitud: string;
+  numeroFacturaEcf: string;
+  fechaFactura: string;
+  tieneRecepcionConduce: boolean;
+  fechaRecepcion: string;
+  numeroLibramientoPago: string;
+  fechaPago: string;
+  bancoCuenta: string;
+  montoFacturado: number;
+  retencionesImpuestos: number;
+  montoPagadoNeto: number;
+  estadoCiclo:
+    | 'COMPLETO'
+    | 'SIN_RECEPCION'
+    | 'SIN_COMPROBANTE'
+    | 'PAGO_FRACCIONADO'
+    | 'EXCEDE_CONTRATO'
+    | 'DUPLICADO'
+    | 'EN_REVISION';
+  observacionPago: string;
 }
 
 export interface BenfordDigitResult {
@@ -70,7 +103,7 @@ export interface ForensicThresholds {
 export interface RealtimeAlert {
   id: string;
   timestamp: string;
-  tipo: 'ADENDA_EXCESIVA' | 'BENFORD_ANOMALIA' | 'FRACCIONAMIENTO' | 'CONCENTRACION';
+  tipo: 'ADENDA_EXCESIVA' | 'BENFORD_ANOMALIA' | 'FRACCIONAMIENTO' | 'CONCENTRACION' | 'CICLO_PAGO';
   severidad: 'CRÍTICA' | 'ALTA' | 'MEDIA';
   titulo: string;
   descripcion: string;
@@ -94,14 +127,97 @@ export interface AuditPeriodScope {
   alcancePericial: string;
 }
 
+export interface DecreeSource {
+  id: string;
+  url: string;
+  titulo: string;
+  ubicacionOrigen: string;
+  numeroDecreto: string;
+  fechaDecreto: string;
+  extractoLiteral: string;
+  fechaConsulta: string;
+  sha256: string;
+  verificadoWeb?: boolean;
+}
+
+export interface DirectorResponsibility {
+  id: string;
+  nombre: string;
+  cedulaId?: string;
+  cargo: string;
+  periodoNumero: number;
+  fechaInicioGestion: string;
+  fechaFinGestion: string;
+  enFuncionesActuales?: boolean;
+  numeroDecretoNombramiento: string;
+  fechaDecretoNombramiento: string;
+  numeroDecretoSalida?: string;
+  fechaDecretoSalida?: string;
+  fuentes: DecreeSource[];
+  responsabilidadObservaciones: string;
+  montoResponsabilidadEstimado?: number;
+  notas?: string;
+}
+
+export interface DirectorSegregationSummary {
+  directorId: string;
+  directorNombre: string;
+  cargo: string;
+  periodoGestion: string;
+  numeroDecreto: string;
+  fuentesCount: number;
+  contratosCount: number;
+  contratosMonto: number;
+  adendasMonto: number;
+  pagosCount: number;
+  pagosMontoNeto: number;
+  observacionesCount: number;
+  observacionesMonto: number;
+  replicasCount: number;
+  contraReplicasCount: number;
+  riesgoCalculado: 'CRÍTICO' | 'ALTO' | 'MEDIO' | 'BAJO';
+  resumenResponsabilidad: string;
+}
+
 export interface DossierSectionItem {
   id: string;
   numero?: number;
+  tipoEscrito?: 'ACTA' | 'RECURSO' | 'INFORME_PRELIMINAR' | 'REPLICA' | 'CONTRA_REPLICA';
   titulo: string;
   contenido: string;
   fecha: string;
+  periodoEtiqueta?: string;
+  fechaDesde?: string;
+  fechaHasta?: string;
+  directorId?: string;
+  directorNombre?: string;
+  fuenteOrigen?: string;
+  urlOrigen?: string;
   sha256: string;
   archivos: EvidenceFile[];
+}
+
+export interface PreReviewIssue {
+  id: string;
+  criterio: string;
+  estado: 'CUMPLE' | 'ATENCION' | 'CRITICO';
+  detalle: string;
+  recomendacion: string;
+}
+
+export type PreReviewDocType = 'ACTA_LECTURA' | 'INFORME_PRELIMINAR' | 'INFORME_FINAL';
+
+export interface InteractivePreReviewReport {
+  tipoDocumento: PreReviewDocType;
+  puntuacionPreparacion: number;
+  estadoAprobacion: 'APROBADO_REVISION' | 'CON_OBSERVACIONES_PREVIAS' | 'BLOQUEADO';
+  resumenEjecutivo: string;
+  hallazgosRevision: PreReviewIssue[];
+  mejorasSugeridas: string[];
+  textoMejoradoSugerido?: string;
+  timestamp: string;
+  sha256: string;
+  modelUsed?: string;
 }
 
 export interface ObservacionDecision {
@@ -117,6 +233,10 @@ export interface ObservacionDecision {
   normativaPais: string;
   severidad: 'CRÍTICA' | 'ALTA' | 'MEDIA' | 'LEVE';
   montoInvolucrado?: number;
+  directorId?: string;
+  directorNombre?: string;
+  fechaHecho?: string;
+  periodoEtiqueta?: string;
 }
 
 export interface TraceabilityLog {
@@ -143,6 +263,7 @@ export interface PaisNormativaConfig {
 export interface ForensicAnalysisResult {
   resumenEjecutivo: string;
   banderasRojas: string[];
+  mejorasControlInterno?: string[];
   codigoPython: string;
   explicacionTecnica: string;
   fundamentoLegal: string;
@@ -151,6 +272,14 @@ export interface ForensicAnalysisResult {
   timestamp: string;
   casoNombre: string;
   observacionesDecididas?: ObservacionDecision[];
+}
+
+export interface StepGuideResponse {
+  estadoPaso: 'LISTO' | 'ATENCION' | 'PENDIENTE';
+  diagnostico: string;
+  pasosRecomendados: string[];
+  mejorasSugeridas: string[];
+  siguientePasoMensaje: string;
 }
 
 export interface CaseSession {
@@ -171,11 +300,15 @@ export interface CaseSession {
   idioma?: string;
   evidenceFile?: EvidenceFile | null;
   contractRows?: ContractEvidenceRow[];
+  paymentCycleRows?: PaymentCycleRow[];
   observaciones?: ObservacionDecision[];
   actaLectura?: DossierSectionItem;
   recursos?: DossierSectionItem[];
   informePreliminar?: DossierSectionItem;
   replicas?: DossierSectionItem[];
+  contraReplicas?: DossierSectionItem[];
+  directors?: DirectorResponsibility[];
+  preReviewReports?: Partial<Record<PreReviewDocType, InteractivePreReviewReport>>;
   traceabilityLogs?: TraceabilityLog[];
   resultado?: ForensicAnalysisResult | null;
 }

@@ -9,14 +9,13 @@ import {
   Shield,
   Clock,
   Building2,
-  Filter,
   Download,
 } from 'lucide-react';
 import { AuditedEntity, CaseSession } from '../types/forensic';
 
 interface Props {
   cases: CaseSession[];
-  entities: AuditedEntity[];
+  activeEntity: AuditedEntity | null;
   activeCaseId: string;
   onRegisterCase: () => Promise<void>;
   onSelectCaseToLoad: (c: CaseSession) => void;
@@ -27,7 +26,7 @@ interface Props {
 
 export const CaseRegistryAndHistorySection: React.FC<Props> = ({
   cases,
-  entities,
+  activeEntity,
   activeCaseId,
   onRegisterCase,
   onSelectCaseToLoad,
@@ -36,27 +35,28 @@ export const CaseRegistryAndHistorySection: React.FC<Props> = ({
   isSaving,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
-  const [entityFilter, setEntityFilter] = useState<string>('ALL');
 
-  const filteredCases = cases.filter((c) => {
-    const matchesEntity =
-      entityFilter === 'ALL' || c.entity?.id === entityFilter || c.entity?.siglas === entityFilter;
+  // Strict scoping: show ONLY cases belonging to the currently active entity
+  const entityCases = activeEntity
+    ? cases.filter((c) => c.entity?.id === activeEntity.id)
+    : [];
+
+  const filteredCases = entityCases.filter((c) => {
     const q = searchQuery.toLowerCase();
-    const matchesSearch =
+    return (
       !q ||
       c.nombreCaso.toLowerCase().includes(q) ||
       (c.codigoCaso || '').toLowerCase().includes(q) ||
-      (c.entity?.nombre || '').toLowerCase().includes(q) ||
-      c.requerimiento.toLowerCase().includes(q);
-    return matchesEntity && matchesSearch;
+      c.requerimiento.toLowerCase().includes(q)
+    );
   });
 
-  const exportAllHistoryJson = () => {
-    const blob = new Blob([JSON.stringify(cases, null, 2)], { type: 'application/json' });
+  const exportEntityHistoryJson = () => {
+    const blob = new Blob([JSON.stringify(entityCases, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `Historial_Casos_Forenses_${new Date().toISOString().split('T')[0]}.json`;
+    a.download = `Expedientes_${activeEntity?.siglas || 'Entidad'}_${new Date().toISOString().split('T')[0]}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -72,74 +72,72 @@ export const CaseRegistryAndHistorySection: React.FC<Props> = ({
             <Archive className="w-5 h-5" />
           </div>
           <div>
-            <h2 className="text-xl font-bold text-white flex items-center gap-2">
-              Registro e Historial de Casos en Pantalla
-              <span className="text-xs font-mono px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-                {cases.length} Guardado(s)
-              </span>
+            <h2 className="text-xl font-bold text-white flex items-center gap-2 flex-wrap">
+              Expedientes Exclusivos en Pantalla
+              {activeEntity ? (
+                <span className="text-xs font-mono px-2.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30">
+                  {activeEntity.siglas} ({entityCases.length} caso(s))
+                </span>
+              ) : (
+                <span className="text-xs font-mono px-2.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                  Sin entidad seleccionada
+                </span>
+              )}
             </h2>
             <p className="text-xs text-slate-400">
-              Persistencia en servidor de expedientes por entidad, consulta inmediata en pantalla y cambio rápido de caso
+              Visualiza, edita y consulta únicamente los casos de la entidad activa actual sin mezclar otras empresas
             </p>
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={exportAllHistoryJson}
-            className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-medium flex items-center gap-1.5 cursor-pointer"
-          >
-            <Download className="w-3.5 h-3.5 text-sky-400" />
-            Respaldar Historial (.json)
-          </button>
+        {activeEntity && (
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={exportEntityHistoryJson}
+              disabled={entityCases.length === 0}
+              className="px-3 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 border border-slate-700 rounded-lg text-xs font-medium flex items-center gap-1.5 cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5 text-sky-400" />
+              Exportar (.json)
+            </button>
 
-          <button
-            type="button"
-            onClick={onRegisterCase}
-            disabled={isSaving}
-            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 shadow-lg shadow-emerald-950/40 cursor-pointer"
-          >
-            <Save className="w-3.5 h-3.5" />
-            {isSaving ? 'Guardando...' : 'Registrar Caso Actual en Historial'}
-          </button>
-        </div>
+            <button
+              type="button"
+              onClick={onRegisterCase}
+              disabled={isSaving}
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 shadow-lg shadow-emerald-950/40 cursor-pointer"
+            >
+              <Save className="w-3.5 h-3.5" />
+              {isSaving ? 'Guardando...' : `Guardar Caso de ${activeEntity.siglas}`}
+            </button>
+          </div>
+        )}
       </div>
 
-      {/* Filters */}
-      <div className="flex flex-col sm:flex-row gap-3">
-        <div className="relative flex-1">
+      {/* Search Bar */}
+      {activeEntity && (
+        <div className="relative">
           <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Buscar por código de caso, entidad, nombre o requerimiento..."
+            placeholder={`Buscar entre los expedientes de ${activeEntity.nombre}...`}
             className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-xs text-white focus:outline-none focus:border-sky-500"
           />
         </div>
+      )}
 
-        <div className="flex items-center gap-2">
-          <Filter className="w-4 h-4 text-slate-400 shrink-0" />
-          <select
-            value={entityFilter}
-            onChange={(e) => setEntityFilter(e.target.value)}
-            className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-sky-500"
-          >
-            <option value="ALL">Todas las Entidades ({cases.length})</option>
-            {entities.map((ent) => (
-              <option key={ent.id} value={ent.id}>
-                {ent.siglas} — {ent.nombre}
-              </option>
-            ))}
-          </select>
+      {/* Table */}
+      {!activeEntity ? (
+        <div className="bg-slate-950/60 border border-dashed border-slate-700 rounded-xl p-8 text-center text-xs text-slate-400">
+          Registra o selecciona primero una entidad auditada en la barra superior para ver y guardar sus expedientes exclusivos.
         </div>
-      </div>
-
-      {/* On-screen Table of Registered Cases */}
-      {filteredCases.length === 0 ? (
+      ) : filteredCases.length === 0 ? (
         <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-8 text-center text-xs text-slate-400">
-          No se encontraron casos registrados con los filtros actuales. Pulsa &quot;Registrar Caso Actual en Historial&quot; para guardar el expediente activo.
+          No hay casos guardados para <strong>{activeEntity.nombre}</strong>. Pulsa{' '}
+          <strong>&quot;Guardar Caso de {activeEntity.siglas}&quot;</strong> para registrar este expediente en pantalla.
         </div>
       ) : (
         <div className="overflow-x-auto rounded-xl border border-slate-800">
@@ -147,9 +145,9 @@ export const CaseRegistryAndHistorySection: React.FC<Props> = ({
             <thead className="bg-slate-950 text-slate-400 uppercase font-mono text-[10.5px] border-b border-slate-800">
               <tr>
                 <th className="py-3 px-3">Código / Caso</th>
-                <th className="py-3 px-3">Entidad Auditada</th>
-                <th className="py-3 px-3">Estado &amp; Evidencia</th>
-                <th className="py-3 px-3">Fecha / Sello SHA-256</th>
+                <th className="py-3 px-3">Entidad Exclusiva</th>
+                <th className="py-3 px-3">Estado &amp; Alcance</th>
+                <th className="py-3 px-3">Fecha / SHA-256</th>
                 <th className="py-3 px-3 text-right">Acciones en Pantalla</th>
               </tr>
             </thead>
@@ -170,7 +168,7 @@ export const CaseRegistryAndHistorySection: React.FC<Props> = ({
                         </span>
                         {isActive && (
                           <span className="text-[9.5px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-bold">
-                            ACTIVO
+                            EN TRABAJO
                           </span>
                         )}
                       </div>
@@ -183,17 +181,17 @@ export const CaseRegistryAndHistorySection: React.FC<Props> = ({
                     <td className="py-3 px-3">
                       <div className="flex items-center gap-1.5 font-medium text-slate-200">
                         <Building2 className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-                        <span>{c.entity?.siglas || 'GENERAL'}</span>
+                        <span>{c.entity?.siglas}</span>
                       </div>
                       <div className="text-[11px] text-slate-400 truncate max-w-[200px]">
-                        {c.entity?.nombre || 'Entidad no especificada'}
+                        {c.entity?.nombre}
                       </div>
                     </td>
 
                     <td className="py-3 px-3">
                       <span
                         className={`inline-block text-[10px] font-bold px-2 py-0.5 rounded-full border ${
-                          c.estado === 'DICTAMEN_EMITIDO' || c.resultado
+                          c.resultado
                             ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
                             : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
                         }`}
@@ -201,7 +199,7 @@ export const CaseRegistryAndHistorySection: React.FC<Props> = ({
                         {c.resultado ? 'DICTAMEN EMITIDO' : c.estado || 'EN PROCESO'}
                       </span>
                       <div className="text-[10.5px] text-slate-400 mt-1 font-mono">
-                        {c.contractRows?.length || 0} reg. • {c.observaciones?.length || 0} obs.
+                        {c.contractRows?.length || 0} contr. • {c.paymentCycleRows?.length || 0} pagos • {c.observaciones?.length || 0} obs.
                       </div>
                     </td>
 
@@ -222,7 +220,6 @@ export const CaseRegistryAndHistorySection: React.FC<Props> = ({
                           type="button"
                           onClick={() => onViewCaseOnScreen(c)}
                           className="px-2.5 py-1.5 bg-sky-600/20 hover:bg-sky-600/30 text-sky-300 border border-sky-500/30 rounded-lg text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
-                          title="Ver todo el expediente completo en pantalla"
                         >
                           <Eye className="w-3.5 h-3.5" />
                           Ver en Pantalla
@@ -231,7 +228,6 @@ export const CaseRegistryAndHistorySection: React.FC<Props> = ({
                           type="button"
                           onClick={() => onSelectCaseToLoad(c)}
                           className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
-                          title="Cargar este caso en el área de trabajo"
                         >
                           <FolderOpen className="w-3.5 h-3.5 text-amber-400" />
                           Cargar
@@ -240,7 +236,7 @@ export const CaseRegistryAndHistorySection: React.FC<Props> = ({
                           type="button"
                           onClick={() => onDeleteCase(c.id)}
                           className="p-1.5 bg-slate-900 hover:bg-red-950/70 text-slate-500 hover:text-red-400 border border-slate-800 hover:border-red-800/50 rounded-lg cursor-pointer transition-colors"
-                          title="Eliminar caso del historial"
+                          title="Eliminar expediente"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>

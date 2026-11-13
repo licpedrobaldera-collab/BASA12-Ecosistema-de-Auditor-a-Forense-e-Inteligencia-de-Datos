@@ -1,5 +1,5 @@
 import express from 'express';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, GenerateContentParameters } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import path from 'path';
@@ -21,7 +21,7 @@ const PORT = Number(process.env.PORT) || 3000;
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Persistent Local Forensic DB (Works identically in Dev and Production)
+// Persistent Local Forensic DB
 const DB_DIR = path.resolve(__dirname, 'forensic_system_db');
 const CASES_DB_FILE = path.join(DB_DIR, 'cases.json');
 const ENTITIES_DB_FILE = path.join(DB_DIR, 'entities.json');
@@ -55,7 +55,6 @@ function writeJsonDb<T>(filePath: string, data: T): void {
 
 ensureDbFiles();
 
-// Initialise GoogleGenAI
 const getAiClient = () => {
   const apiKey = process.env.GEMINI_API_KEY || '';
   if (!apiKey) return null;
@@ -69,16 +68,82 @@ const getAiClient = () => {
   });
 };
 
-// PII Anonymizer helper
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function isTransientAiError(err: any): boolean {
+  const msg = String(err?.message || err || '').toLowerCase();
+  const status = err?.status || err?.code;
+  return (
+    status === 503 ||
+    status === 429 ||
+    status === 500 ||
+    msg.includes('503') ||
+    msg.includes('unavailable') ||
+    msg.includes('high demand') ||
+    msg.includes('overloaded') ||
+    msg.includes('resource_exhausted') ||
+    msg.includes('rate limit')
+  );
+}
+
+/**
+ * Resilient Gemini caller with exponential backoff + model fallback
+ * Resolves transient 503 UNAVAILABLE spikes seamlessly.
+ */
+async function callGeminiWithResilience(
+  ai: GoogleGenAI,
+  params: Omit<GenerateContentParameters, 'model'>,
+  preferredModels: string[] = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']
+) {
+  let lastError: any = null;
+
+  for (const model of preferredModels) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          ...params,
+          model,
+        });
+        return { response, modelUsed: model };
+      } catch (err: any) {
+        lastError = err;
+        const errMsg = String(err?.message || err || '');
+        console.warn(`[Gemini ${model}] attempt ${attempt + 1} failed:`, errMsg);
+        if (errMsg.includes('exceeded your current quota') || errMsg.includes('404') || errMsg.includes('NOT_FOUND')) {
+          break;
+        }
+        if (!isTransientAiError(err)) {
+          throw err;
+        }
+        await sleep(900 * Math.pow(2, attempt));
+      }
+    }
+  }
+
+  throw lastError || new Error('El motor de IA no respondió tras múltiples reintentos.');
+}
+
+function parseJsonSafe<T>(rawText: string, fallback: T): T {
+  try {
+    return JSON.parse(rawText) as T;
+  } catch {
+    const match = rawText.match(/```json\s*([\s\S]*?)\s*```/) || rawText.match(/\{[\s\S]*\}/) || rawText.match(/\[[\s\S]*\]/);
+    if (match) {
+      try {
+        return JSON.parse(match[1] || match[0]) as T;
+      } catch {
+        return fallback;
+      }
+    }
+    return fallback;
+  }
+}
+
 function anonymizeText(text: string): string {
   let clean = text;
-  // Dominican Cedula: 000-0000000-0 or 11 digits
   clean = clean.replace(/\b\d{3}-\d{7}-\d{1}\b/g, '[CÉDULA_PROTEGIDA]');
-  // RNC (9 or 11 digits)
   clean = clean.replace(/\b(1\d{8}|4\d{8}|5\d{8})\b/g, '[RNC_PROTEGIDO]');
-  // Bank accounts (10-20 digits)
   clean = clean.replace(/\b\d{10,20}\b/g, '[CTA_BANCARIA_PROTEGIDA]');
-  // Common name patterns
   clean = clean.replace(
     /(?:Sr\.|Sra\.|Lic\.|Dr\.|Ing\.|Don|Doña)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)/g,
     '$1 [APELLIDO_ANONIMIZADO]'
@@ -86,7 +151,6 @@ function anonymizeText(text: string): string {
   return clean;
 }
 
-// Helper: Extract numeric amounts from raw text for Benford / Contract heuristics
 function extractNumericAmountsFromText(text: string): number[] {
   const matches = text.match(/(?:RD\$|US\$|\$|€)?\s*\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})?\b/g) || [];
   const nums: number[] = [];
@@ -100,208 +164,238 @@ function extractNumericAmountsFromText(text: string): number[] {
   return nums.slice(0, 1000);
 }
 
-// Health check route for Production monitoring
+async function parseBufferByType(buffer: Buffer, fileName: string, mimeType: string) {
+  const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+  const ext = path.extname(fileName.split('?')[0]).toLowerCase();
+
+  let extractedText = '';
+  let extractedRows: Record<string, any>[] = [];
+  let sheetNames: string[] = [];
+  let pageCount: number | undefined;
+  let parsedFormat = ext ? ext.replace('.', '').toUpperCase() : 'DIGITAL';
+  let numericAmounts: number[] = [];
+  let discoveredLinks: { label: string; url: string }[] = [];
+
+  // 1. EXCEL / SPREADSHEETS / CSV
+  if (
+    ['.xlsx', '.xls', '.xlsm', '.xlsb', '.ods', '.csv', '.tsv'].includes(ext) ||
+    mimeType.includes('spreadsheet') ||
+    mimeType.includes('excel') ||
+    mimeType.includes('text/csv')
+  ) {
+    const workbook = XLSX.read(buffer, { type: 'buffer' });
+    sheetNames = workbook.SheetNames;
+    parsedFormat = ext === '.csv' || mimeType.includes('csv') ? 'CSV' : 'EXCEL';
+
+    const textParts: string[] = [];
+    for (const sName of sheetNames) {
+      const sheet = workbook.Sheets[sName];
+      const jsonRows = XLSX.utils.sheet_to_json<Record<string, any>>(sheet, { defval: '' });
+      if (jsonRows.length > 0) {
+        extractedRows = extractedRows.concat(jsonRows.slice(0, 500 - extractedRows.length));
+      }
+      const csvContent = XLSX.utils.sheet_to_csv(sheet);
+      textParts.push(`=== HOJA: ${sName} (${jsonRows.length} filas) ===\n${csvContent}`);
+
+      for (const row of jsonRows) {
+        for (const val of Object.values(row)) {
+          if (typeof val === 'number' && val > 0) {
+            numericAmounts.push(val);
+          } else if (typeof val === 'string') {
+            const cleaned = val.replace(/[^0-9.-]/g, '');
+            const num = parseFloat(cleaned);
+            if (!isNaN(num) && num >= 100) numericAmounts.push(num);
+          }
+        }
+      }
+    }
+    extractedText = textParts.join('\n\n');
+  }
+  // 2. WORD (.docx, .docm)
+  else if (['.docx', '.docm'].includes(ext) || mimeType.includes('wordprocessingml')) {
+    parsedFormat = 'WORD (.DOCX)';
+    const result = await mammoth.extractRawText({ buffer });
+    extractedText = (result.value || '').trim();
+    numericAmounts = extractNumericAmountsFromText(extractedText);
+  }
+  // 3. PDF (.pdf)
+  else if (ext === '.pdf' || mimeType.includes('application/pdf')) {
+    parsedFormat = 'PDF';
+    try {
+      const pdfResult = await extractPdfText(new Uint8Array(buffer));
+      pageCount = pdfResult.totalPages;
+      extractedText = Array.isArray(pdfResult.text)
+        ? pdfResult.text.join('\n\n')
+        : String(pdfResult.text || '');
+      extractedText = extractedText.trim();
+    } catch (pdfErr) {
+      console.warn('unpdf extraction fallback:', pdfErr);
+    }
+
+    if (!extractedText || extractedText.length < 25) {
+      const ai = getAiClient();
+      if (ai && buffer.length <= 15 * 1024 * 1024) {
+        try {
+          const { response } = await callGeminiWithResilience(ai, {
+            contents: {
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: 'application/pdf',
+                    data: buffer.toString('base64'),
+                  },
+                },
+                {
+                  text: 'Extrae y transcribe literalmente todo el texto, tablas, montos, fechas, nombres de entidades y cláusulas de este documento PDF para auditoría forense.',
+                },
+              ],
+            },
+          });
+          extractedText = response.text || extractedText;
+          parsedFormat = 'PDF (OCR IA)';
+        } catch (ocrErr) {
+          console.warn('Gemini PDF OCR skipped/failed:', ocrErr);
+        }
+      }
+    }
+    numericAmounts = extractNumericAmountsFromText(extractedText);
+  }
+  // 4. IMAGES (OCR IA)
+  else if (
+    ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff'].includes(ext) ||
+    mimeType.startsWith('image/')
+  ) {
+    parsedFormat = `IMAGEN (${ext.replace('.', '').toUpperCase() || 'OCR'})`;
+    const ai = getAiClient();
+    if (ai) {
+      try {
+        const { response } = await callGeminiWithResilience(ai, {
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: mimeType || 'image/png',
+                  data: buffer.toString('base64'),
+                },
+              },
+              {
+                text: 'Extrae literalmente todo el texto visible, números de factura/contrato, fechas, RNC/NIF, importes monetarios y detalles relevantes de esta imagen.',
+              },
+            ],
+          },
+        });
+        extractedText = response.text || '';
+      } catch (imgErr: any) {
+        extractedText = `[Imagen digital ${fileName} - OCR no disponible temporalmente: ${imgErr.message}]`;
+      }
+    } else {
+      extractedText = `[Imagen digital ${fileName} cargada (${(buffer.length / 1024).toFixed(1)} KB). SHA-256: ${sha256}]`;
+    }
+    numericAmounts = extractNumericAmountsFromText(extractedText);
+  }
+  // 5. HTML / WEB PORTAL
+  else if (['.html', '.htm'].includes(ext) || mimeType.includes('text/html')) {
+    parsedFormat = 'PORTAL HTML';
+    const rawHtml = buffer.toString('utf-8');
+    // Discover links to documents/portals
+    const linkRegex = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = linkRegex.exec(rawHtml)) !== null && discoveredLinks.length < 40) {
+      const href = m[1].trim();
+      const label = m[2].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+      if (href && !href.startsWith('#') && !href.startsWith('javascript:') && label) {
+        discoveredLinks.push({ label: label.slice(0, 120), url: href });
+      }
+    }
+    extractedText = rawHtml
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<\/(p|div|tr|li|h1|h2|h3|h4|td|th)>/gi, '\n')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/[ \t]+/g, ' ')
+      .replace(/\n\s*\n+/g, '\n')
+      .trim();
+    numericAmounts = extractNumericAmountsFromText(extractedText);
+  }
+  // 6. TEXT / JSON / XML / LOG / SQL
+  else if (
+    ['.txt', '.json', '.xml', '.md', '.log', '.sql', '.yaml', '.yml', '.eml', '.ini', '.conf', '.py', '.ts', '.js'].includes(ext) ||
+    mimeType.startsWith('text/') ||
+    mimeType.includes('json') ||
+    mimeType.includes('xml')
+  ) {
+    parsedFormat = ext ? ext.replace('.', '').toUpperCase() : 'TEXTO';
+    const rawStr = buffer.toString('utf-8');
+    if (ext === '.json' || mimeType.includes('json')) {
+      try {
+        const parsed = JSON.parse(rawStr);
+        extractedText = JSON.stringify(parsed, null, 2);
+        if (Array.isArray(parsed)) {
+          extractedRows = parsed.slice(0, 500);
+        }
+      } catch {
+        extractedText = rawStr;
+      }
+    } else {
+      extractedText = rawStr;
+    }
+    numericAmounts = extractNumericAmountsFromText(extractedText);
+  }
+  // 7. ANY OTHER DIGITAL FORMAT
+  else {
+    parsedFormat = ext ? `DIGITAL (${ext.toUpperCase()})` : 'FORMATO DIGITAL';
+    const decoded = buffer.toString('utf-8');
+    const printableRuns = decoded.match(/[\p{L}\p{N}\p{P}\p{Zs}\r\n\t]{4,}/gu) || [];
+    extractedText = printableRuns.join('\n').trim();
+    if (!extractedText || extractedText.length < 25) {
+      extractedText = `[Archivo digital "${fileName}" (${(buffer.length / 1024).toFixed(2)} KB) custodiado con sello SHA-256: ${sha256}]`;
+    }
+    numericAmounts = extractNumericAmountsFromText(extractedText);
+  }
+
+  return {
+    sha256,
+    parsedFormat,
+    pageCount,
+    sheetNames,
+    extractedText: extractedText.slice(0, 120000),
+    contentSnippet: extractedText.slice(0, 1000),
+    extractedRows: extractedRows.slice(0, 500),
+    numericAmounts: numericAmounts.slice(0, 1000),
+    discoveredLinks,
+  };
+}
+
+// Health check
 app.get('/api/health', (_req, res) => {
   res.json({
     status: 'ok',
     environment: process.env.NODE_ENV || 'development',
     geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
+    primaryModel: 'gemini-4-hydrogen',
     timestamp: new Date().toISOString(),
   });
 });
 
 // =========================================================================
-// UNIVERSAL DIGITAL FORMAT PARSER (PDF, Excel, Word, TXT, JSON, XML, OCR)
+// PARSE FILE (PDF, Excel, Word, TXT, JSON, HTML, Images OCR, Digital)
 // =========================================================================
 app.post('/api/forensic/parse-file', async (req, res) => {
   try {
     const { fileName = 'documento', mimeType = '', base64Data = '' } = req.body;
-
     if (!base64Data) {
       return res.status(400).json({ success: false, error: 'No se recibió contenido del archivo.' });
     }
-
     const buffer = Buffer.from(base64Data, 'base64');
-    const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
-    const ext = path.extname(fileName).toLowerCase();
-
-    let extractedText = '';
-    let extractedRows: Record<string, any>[] = [];
-    let sheetNames: string[] = [];
-    let pageCount: number | undefined;
-    let parsedFormat = ext ? ext.replace('.', '').toUpperCase() : 'BINARIO';
-    let numericAmounts: number[] = [];
-
-    // 1. EXCEL / SPREADSHEETS / CSV (.xlsx, .xls, .xlsm, .xlsb, .ods, .csv, .tsv)
-    if (['.xlsx', '.xls', '.xlsm', '.xlsb', '.ods', '.csv', '.tsv'].includes(ext)) {
-      const workbook = XLSX.read(buffer, { type: 'buffer' });
-      sheetNames = workbook.SheetNames;
-      parsedFormat = ext === '.csv' ? 'CSV' : 'EXCEL';
-
-      const textParts: string[] = [];
-      for (const sName of sheetNames) {
-        const sheet = workbook.Sheets[sName];
-        const jsonRows = XLSX.utils.sheet_to_json<Record<string, any>>(sheet, { defval: '' });
-        if (extractedRows.length === 0 && jsonRows.length > 0) {
-          extractedRows = jsonRows.slice(0, 500);
-        } else if (jsonRows.length > 0) {
-          extractedRows = extractedRows.concat(jsonRows.slice(0, 200));
-        }
-
-        const csvContent = XLSX.utils.sheet_to_csv(sheet);
-        textParts.push(`=== HOJA: ${sName} (${jsonRows.length} filas) ===\n${csvContent}`);
-
-        // Extract numeric amounts directly from table cells
-        for (const row of jsonRows) {
-          for (const val of Object.values(row)) {
-            if (typeof val === 'number' && val > 0) {
-              numericAmounts.push(val);
-            } else if (typeof val === 'string') {
-              const cleaned = val.replace(/[^0-9.-]/g, '');
-              const num = parseFloat(cleaned);
-              if (!isNaN(num) && num >= 100) numericAmounts.push(num);
-            }
-          }
-        }
-      }
-      extractedText = textParts.join('\n\n');
-    }
-    // 2. WORD DOCUMENTS (.docx, .docm)
-    else if (['.docx', '.docm'].includes(ext)) {
-      parsedFormat = 'WORD (.DOCX)';
-      const result = await mammoth.extractRawText({ buffer });
-      extractedText = (result.value || '').trim();
-      numericAmounts = extractNumericAmountsFromText(extractedText);
-    }
-    // 3. PDF DOCUMENTS (.pdf)
-    else if (ext === '.pdf' || mimeType === 'application/pdf') {
-      parsedFormat = 'PDF';
-      try {
-        const pdfResult = await extractPdfText(new Uint8Array(buffer));
-        pageCount = pdfResult.totalPages;
-        extractedText = Array.isArray(pdfResult.text)
-          ? pdfResult.text.join('\n\n')
-          : String(pdfResult.text || '');
-        extractedText = extractedText.trim();
-      } catch (pdfErr) {
-        console.warn('unpdf extraction fallback:', pdfErr);
-      }
-
-      // If PDF is scanned (0 selectable text), try Gemini Multimodal OCR
-      if (!extractedText || extractedText.length < 25) {
-        const ai = getAiClient();
-        if (ai && buffer.length <= 15 * 1024 * 1024) {
-          try {
-            const ocrResp = await ai.models.generateContent({
-              model: 'gemini-3.8-flash',
-              contents: {
-                parts: [
-                  {
-                    inlineData: {
-                      mimeType: 'application/pdf',
-                      data: base64Data,
-                    },
-                  },
-                  {
-                    text: 'Extrae y transcribe íntegramente todo el texto, tablas, montos, fechas, nombres de entidades y cláusulas de este documento PDF para auditoría forense.',
-                  },
-                ],
-              },
-            });
-            extractedText = ocrResp.text || extractedText;
-            parsedFormat = 'PDF (OCR Multimodal IA)';
-          } catch (ocrErr) {
-            console.warn('Gemini PDF OCR skipped/failed:', ocrErr);
-          }
-        }
-      }
-      numericAmounts = extractNumericAmountsFromText(extractedText);
-    }
-    // 4. IMAGES (.png, .jpg, .jpeg, .webp, .gif, .bmp) -> OCR Multimodal IA
-    else if (
-      ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff'].includes(ext) ||
-      mimeType.startsWith('image/')
-    ) {
-      parsedFormat = `IMAGEN (${ext.replace('.', '').toUpperCase() || 'OCR'})`;
-      const ai = getAiClient();
-      if (ai) {
-        try {
-          const ocrResp = await ai.models.generateContent({
-            model: 'gemini-3.8-flash',
-            contents: {
-              parts: [
-                {
-                  inlineData: {
-                    mimeType: mimeType || 'image/png',
-                    data: base64Data,
-                  },
-                },
-                {
-                  text: 'Extrae todo el texto visible, números de factura/contrato, fechas, RNC/NIF, importes monetarios y detalles relevantes de esta imagen de evidencia digital.',
-                },
-              ],
-            },
-          });
-          extractedText = ocrResp.text || '';
-        } catch (imgErr: any) {
-          extractedText = `[Imagen digital ${fileName} - ${buffer.length} bytes. OCR no disponible: ${imgErr.message}]`;
-        }
-      } else {
-        extractedText = `[Imagen digital ${fileName} cargada (${(buffer.length / 1024).toFixed(1)} KB). Sello SHA-256: ${sha256}]`;
-      }
-      numericAmounts = extractNumericAmountsFromText(extractedText);
-    }
-    // 5. TEXT, JSON, XML, HTML, LOG, MD, SQL, RTF, YAML, EML, ETC.
-    else if (
-      ['.txt', '.json', '.xml', '.html', '.htm', '.md', '.log', '.sql', '.yaml', '.yml', '.eml', '.ini', '.conf', '.py', '.ts', '.js'].includes(ext) ||
-      mimeType.startsWith('text/')
-    ) {
-      parsedFormat = ext ? ext.replace('.', '').toUpperCase() : 'TEXTO';
-      const rawStr = buffer.toString('utf-8');
-      if (ext === '.json') {
-        try {
-          const parsed = JSON.parse(rawStr);
-          extractedText = JSON.stringify(parsed, null, 2);
-          if (Array.isArray(parsed)) {
-            extractedRows = parsed.slice(0, 500);
-          }
-        } catch {
-          extractedText = rawStr;
-        }
-      } else if (ext === '.html' || ext === '.htm') {
-        extractedText = rawStr.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-      } else {
-        extractedText = rawStr;
-      }
-      numericAmounts = extractNumericAmountsFromText(extractedText);
-    }
-    // 6. ANY OTHER DIGITAL FORMAT (Legacy .doc, .rtf, binary logs, etc.)
-    else {
-      parsedFormat = ext ? `DIGITAL (${ext.toUpperCase()})` : 'FORMATO DIGITAL';
-      // Extract readable UTF-8 / ASCII sequences from any digital file
-      const decoded = buffer.toString('utf-8');
-      const printableRuns = decoded.match(/[\p{L}\p{N}\p{P}\p{Zs}\r\n\t]{4,}/gu) || [];
-      extractedText = printableRuns.join('\n').trim();
-
-      if (!extractedText || extractedText.length < 30) {
-        extractedText = `[Archivo digital "${fileName}" (${(buffer.length / 1024).toFixed(2)} KB, tipo: ${mimeType || 'application/octet-stream'}) custodiado con sello SHA-256: ${sha256}]`;
-      }
-      numericAmounts = extractNumericAmountsFromText(extractedText);
-    }
-
+    const parsed = await parseBufferByType(buffer, fileName, mimeType);
     res.json({
       success: true,
       fileName,
       size: buffer.length,
-      sha256,
-      parsedFormat,
-      pageCount,
-      sheetNames,
-      extractedText: extractedText.slice(0, 100000), // cap at 100k chars for payload safety
-      contentSnippet: extractedText.slice(0, 800),
-      extractedRows: extractedRows.slice(0, 500),
-      numericAmounts: numericAmounts.slice(0, 1000),
-      totalCharacters: extractedText.length,
+      ...parsed,
+      totalCharacters: parsed.extractedText.length,
     });
   } catch (error: any) {
     console.error('Error in /api/forensic/parse-file:', error);
@@ -313,11 +407,402 @@ app.post('/api/forensic/parse-file', async (req, res) => {
 });
 
 // =========================================================================
-// PERSISTENT CASES & ENTITIES REGISTRY ROUTES
+// FETCH & EXTRACT FROM LIVE URL / TRANSPARENCY PORTAL / ONLINE DOCUMENT
 // =========================================================================
-app.get('/api/cases', (_req, res) => {
+app.post('/api/forensic/fetch-url', async (req, res) => {
+  try {
+    const { url } = req.body;
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({ success: false, error: 'Debe proporcionar un enlace o URL válida.' });
+    }
+
+    let normalizedUrl = url.trim();
+    if (!/^https?:\/\//i.test(normalizedUrl)) {
+      normalizedUrl = `https://${normalizedUrl}`;
+    }
+
+    const parsedUrl = new URL(normalizedUrl);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20000);
+
+    const resp = await fetch(parsedUrl.toString(), {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; ForensicAuditExtractor/1.0)',
+        Accept: 'text/html,application/pdf,application/json,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,*/*',
+      },
+    });
+    clearTimeout(timer);
+
+    if (!resp.ok) {
+      return res.status(400).json({
+        success: false,
+        error: `El portal respondió con código HTTP ${resp.status} (${resp.statusText}). Verifique que el enlace sea público.`,
+      });
+    }
+
+    const arrayBuf = await resp.arrayBuffer();
+    const buffer = Buffer.from(arrayBuf);
+    const contentType = resp.headers.get('content-type') || 'text/html';
+    const fileNameFromUrl = path.basename(parsedUrl.pathname) || parsedUrl.hostname;
+
+    const parsed = await parseBufferByType(buffer, fileNameFromUrl, contentType);
+    // Resolve relative discovered links to absolute URLs
+    const resolvedLinks = (parsed.discoveredLinks || []).map((lnk) => {
+      try {
+        return { label: lnk.label, url: new URL(lnk.url, parsedUrl.toString()).toString() };
+      } catch {
+        return lnk;
+      }
+    });
+
+    res.json({
+      success: true,
+      url: parsedUrl.toString(),
+      fileName: fileNameFromUrl,
+      mimeType: contentType,
+      size: buffer.length,
+      ...parsed,
+      discoveredLinks: resolvedLinks,
+      totalCharacters: parsed.extractedText.length,
+    });
+  } catch (error: any) {
+    console.error('Error in /api/forensic/fetch-url:', error);
+    res.status(500).json({
+      success: false,
+      error: `No se pudo leer el enlace o portal: ${error.message}`,
+    });
+  }
+});
+
+// =========================================================================
+// AI STRUCTURED EXTRACTOR FROM VERBATIM TEXT (Real Contracts, Payments, Entity)
+// =========================================================================
+app.post('/api/forensic/extract-structured', async (req, res) => {
+  try {
+    const ai = getAiClient();
+    if (!ai) {
+      return res.status(503).json({
+        success: false,
+        error: 'GEMINI_API_KEY no configurada en el servidor.',
+      });
+    }
+
+    const { rawText = '', entityName = '', paisNormativa = 'República Dominicana', adendaThresholdPct = 50 } = req.body;
+    if (!rawText.trim()) {
+      return res.status(400).json({ success: false, error: 'No hay texto extraído para analizar.' });
+    }
+
+    const promptText = `
+[EXTRACCIÓN FORENSE ESTRICTA DESDE TEXTO REAL DE ORIGEN]
+Entidad Auditada: ${entityName || 'Por determinar del documento'}
+País / Normativa: ${paisNormativa}
+
+REGLA DE ORO ANTI-ALUCINACIÓN:
+Extrae ÚNICAMENTE datos reales que aparezcan literalmente en el TEXTO SUMINISTRADO.
+NO inventes nombres de proveedores, contratos, facturas ni montos que no estén en el texto.
+Si un campo no aparece en el texto, déjalo vacío "" o en 0.
+
+[TEXTO REAL SUMINISTRADO]:
+${rawText.slice(0, 35000)}
+
+Devuelve JSON estricto con esta estructura:
+{
+  "entidadDetectada": {
+    "nombre": "Nombre oficial encontrado en el texto o vacío",
+    "rncNif": "RNC/NIF si aparece o vacío",
+    "alcanceResumen": "Resumen literal del alcance/antecedentes del documento"
+  },
+  "contratosDetectados": [
+    {
+      "contratoId": "Código o proceso real",
+      "proveedor": "Nombre real del proveedor/beneficiario",
+      "rnc": "RNC/NIF real o N/D",
+      "montoOriginal": 0,
+      "montoAdenda": 0,
+      "fechaContrato": "YYYY-MM-DD",
+      "fechaAdenda": "YYYY-MM-DD",
+      "objeto": "Descripción literal del bien/servicio/obra"
+    }
+  ],
+  "cicloPagosDetectado": [
+    {
+      "ordenNumero": "OC / Proceso / Solicitud",
+      "contratoId": "Contrato vinculado",
+      "beneficiario": "Proveedor o empleado real",
+      "rnc": "RNC/Cédula si consta o N/D",
+      "fechaSolicitud": "YYYY-MM-DD",
+      "numeroFacturaEcf": "NCF / e-CF / Factura si consta",
+      "fechaFactura": "YYYY-MM-DD",
+      "tieneRecepcionConduce": true,
+      "fechaRecepcion": "YYYY-MM-DD",
+      "numeroLibramientoPago": "Libramiento / Cheque / Transferencia si consta",
+      "fechaPago": "YYYY-MM-DD",
+      "bancoCuenta": "Banco o cuenta si consta",
+      "montoFacturado": 0,
+      "retencionesImpuestos": 0,
+      "montoPagadoNeto": 0,
+      "observacionPago": "Estado o incidencia literal del pago"
+    }
+  ],
+  "observacionesDetectadas": [
+    {
+      "codigoObservacion": "OBS-01",
+      "titulo": "Título del hallazgo u observación real en el texto",
+      "descripcionPreliminar": "Descripción literal extraída del documento",
+      "descargoAlegato": "Descargo/justificación si consta en el texto",
+      "montoInvolucrado": 0,
+      "severidad": "CRÍTICA | ALTA | MEDIA | LEVE"
+    }
+  ]
+}
+`;
+
+    const { response, modelUsed } = await callGeminiWithResilience(ai, {
+      contents: promptText,
+      config: { responseMimeType: 'application/json' },
+    });
+
+    const parsed = parseJsonSafe<any>(response.text || '{}', {
+      entidadDetectada: {},
+      contratosDetectados: [],
+      cicloPagosDetectado: [],
+      observacionesDetectadas: [],
+    });
+
+    // Normalize contracts
+    const contracts = (parsed.contratosDetectados || []).map((c: any, idx: number) => {
+      const orig = Number(c.montoOriginal) || 0;
+      const adenda = Number(c.montoAdenda) || 0;
+      const pct = orig > 0 ? Number(((adenda / orig) * 100).toFixed(2)) : 0;
+      const anomalo = pct > adendaThresholdPct;
+      return {
+        id: `EXT-CT-${Date.now()}-${idx}`,
+        contratoId: c.contratoId || `DOC-${idx + 1}`,
+        proveedor: c.proveedor || 'No especificado en origen',
+        rnc: c.rnc || 'N/D',
+        montoOriginal: orig,
+        montoAdenda: adenda,
+        adendaPct: pct,
+        fechaContrato: c.fechaContrato || '',
+        fechaAdenda: c.fechaAdenda || '',
+        origen: 'Extracción Textual Origen',
+        objeto: c.objeto || '',
+        esAnomalo: anomalo,
+        motivoAlerta: anomalo ? `Variación +${pct}% excede umbral ${adendaThresholdPct}%` : 'Extraído de documento real',
+      };
+    });
+
+    // Normalize payment cycle rows
+    const payments = (parsed.cicloPagosDetectado || []).map((p: any, idx: number) => {
+      const facturado = Number(p.montoFacturado) || 0;
+      const ret = Number(p.retencionesImpuestos) || 0;
+      const neto = Number(p.montoPagadoNeto) || Math.max(0, facturado - ret);
+      const hasRecepcion = Boolean(p.tieneRecepcionConduce);
+      const hasEcf = Boolean(p.numeroFacturaEcf && p.numeroFacturaEcf.trim() !== '' && p.numeroFacturaEcf !== 'N/D');
+      let estadoCiclo = 'COMPLETO';
+      if (!hasRecepcion) estadoCiclo = 'SIN_RECEPCION';
+      else if (!hasEcf) estadoCiclo = 'SIN_COMPROBANTE';
+
+      return {
+        id: `PAY-${Date.now()}-${idx}`,
+        ordenNumero: p.ordenNumero || `OC-${idx + 1}`,
+        contratoId: p.contratoId || '',
+        beneficiario: p.beneficiario || 'Beneficiario extraído',
+        rnc: p.rnc || 'N/D',
+        fechaSolicitud: p.fechaSolicitud || '',
+        numeroFacturaEcf: p.numeroFacturaEcf || '',
+        fechaFactura: p.fechaFactura || '',
+        tieneRecepcionConduce: hasRecepcion,
+        fechaRecepcion: p.fechaRecepcion || '',
+        numeroLibramientoPago: p.numeroLibramientoPago || '',
+        fechaPago: p.fechaPago || '',
+        bancoCuenta: p.bancoCuenta || '',
+        montoFacturado: facturado,
+        retencionesImpuestos: ret,
+        montoPagadoNeto: neto,
+        estadoCiclo,
+        observacionPago: p.observacionPago || 'Extraído del documento fuente',
+      };
+    });
+
+    res.json({
+      success: true,
+      modelUsed,
+      entidadDetectada: parsed.entidadDetectada || {},
+      contratosDetectados: contracts,
+      cicloPagosDetectado: payments,
+      observacionesDetectadas: parsed.observacionesDetectadas || [],
+    });
+  } catch (error: any) {
+    console.error('Error in /api/forensic/extract-structured:', error);
+    res.status(error?.status === 503 ? 503 : 500).json({
+      success: false,
+      error: error.message || 'Error extrayendo datos estructurados con IA.',
+    });
+  }
+});
+
+// =========================================================================
+// AI STEP-BY-STEP GUIDE COACH (Guides user step 1 -> 5 with real data)
+// =========================================================================
+app.post('/api/forensic/guide-step', async (req, res) => {
+  try {
+    const ai = getAiClient();
+    if (!ai) {
+      return res.status(503).json({
+        success: false,
+        error: 'GEMINI_API_KEY no configurada en el servidor.',
+      });
+    }
+
+    const {
+      step = 1,
+      entity = null,
+      caseName = '',
+      paisNormativa = 'República Dominicana',
+      idioma = 'Español',
+      evidenceSummary = '',
+      contractsCount = 0,
+      paymentsCount = 0,
+      observationsCount = 0,
+      hasFinalResult = false,
+    } = req.body;
+
+    const promptText = `
+[GUÍA PERICIAL PASO A PASO CON IA]
+Eres un Director de Auditoría Forense guiando paso a paso al auditor en tiempo real.
+Idioma de respuesta: ${idioma}
+País / Normativa: ${paisNormativa}
+Paso actual del flujo (1 al 5): PASO ${step}
+
+DATOS REALES ACTUALES DEL EXPEDIENTE EN CURSO:
+- Entidad Auditada: ${entity ? `${entity.nombre} (${entity.siglas}, RNC/NIF: ${entity.rncNif})` : 'Aún no registrada'}
+- Antecedentes / Alcance de la Entidad: ${entity?.descripcion ? entity.descripcion.slice(0, 1500) : 'Sin descripción'}
+- Caso activo: ${caseName || 'Sin nombre'}
+- Evidencia textual / archivo / URL cargada: ${evidenceSummary ? evidenceSummary.slice(0, 2500) : 'Aún no cargada'}
+- Registros en Matriz Contractual: ${contractsCount}
+- Registros en Ciclo de Pagos: ${paymentsCount}
+- Observaciones cargadas: ${observationsCount}
+- Dictamen Final generado: ${hasFinalResult ? 'Sí' : 'No'}
+
+Devuelve JSON estricto guiando este PASO ${step} y proponiendo mejoras concretas basadas SOLO en los datos reales suministrados:
+{
+  "estadoPaso": "LISTO | ATENCION | PENDIENTE",
+  "diagnostico": "Evaluación clara y breve del estado real del paso actual para esta entidad.",
+  "pasosRecomendados": [
+    "Acción concreta 1 que el auditor debe verificar o completar ahora",
+    "Acción concreta 2",
+    "Acción concreta 3"
+  ],
+  "mejorasSugeridas": [
+    "Mejora concreta de procedimiento o control interno aplicable a esta entidad y los datos cargados",
+    "Segunda mejora de calidad pericial"
+  ],
+  "siguientePasoMensaje": "Indicación precisa para avanzar al siguiente paso o concluir el dictamen."
+}
+`;
+
+    const { response, modelUsed } = await callGeminiWithResilience(ai, {
+      contents: promptText,
+      config: { responseMimeType: 'application/json' },
+    });
+
+    const data = parseJsonSafe<any>(response.text || '{}', {
+      estadoPaso: 'ATENCION',
+      diagnostico: 'Revise los campos suministrados en este paso antes de continuar.',
+      pasosRecomendados: ['Verifique los datos reales ingresados.', 'Guarde el avance del expediente.'],
+      mejorasSugeridas: ['Documentar cada fuente con sello SHA-256 y referencia normativa vigente.'],
+      siguientePasoMensaje: 'Puede continuar al siguiente paso cuando valide esta información.',
+    });
+
+    res.json({ success: true, modelUsed, guide: data });
+  } catch (error: any) {
+    console.error('Error in /api/forensic/guide-step:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'No se pudo generar la guía IA para este paso.',
+    });
+  }
+});
+
+// =========================================================================
+// ANALYZE PAYMENT CYCLE (Ciclo de Pagos Completo)
+// =========================================================================
+app.post('/api/forensic/analyze-payment-cycle', async (req, res) => {
+  try {
+    const ai = getAiClient();
+    if (!ai) {
+      return res.status(503).json({ success: false, error: 'GEMINI_API_KEY no configurada en el servidor.' });
+    }
+
+    const {
+      entityName = 'Entidad Auditada',
+      paisNormativa = 'República Dominicana',
+      idioma = 'Español',
+      paymentCycleRows = [],
+      contractRows = [],
+    } = req.body;
+
+    if (!Array.isArray(paymentCycleRows) || paymentCycleRows.length === 0) {
+      return res.status(400).json({ success: false, error: 'No hay registros en el Ciclo de Pagos para analizar.' });
+    }
+
+    const promptText = `
+[AUDITORÍA FORENSE DEL CICLO DE PAGOS - DATOS REALES]
+Entidad: ${entityName}
+Jurisdicción: ${paisNormativa}
+Idioma: ${idioma}
+
+Registros del Ciclo de Pagos (Solicitud -> Contrato -> Recepción -> e-CF -> Libramiento -> Pago Neto):
+${JSON.stringify(paymentCycleRows.slice(0, 80), null, 2)}
+
+Contratos de Referencia:
+${JSON.stringify(contractRows.slice(0, 40), null, 2)}
+
+Analiza ÚNICAMENTE estos datos reales y detecta:
+1. Pagos sin acta de recepción/conduce conforme.
+2. Pagos sin comprobante fiscal (e-CF / factura) o con fechas inconsistentes (pago antes de factura o recepción).
+3. Posible fraccionamiento de pagos consecutivos al mismo beneficiario.
+4. Diferencias entre monto facturado, retenciones y monto pagado neto, o exceso sobre contrato.
+5. Mejoras concretas al ciclo de control interno de pagos y tesorería.
+
+Devuelve JSON estricto:
+{
+  "resumenCiclo": "Diagnóstico forense integral del ciclo de pagos basado en los datos reales.",
+  "hallazgosCriticos": ["Hallazgo 1 con datos reales", "Hallazgo 2"],
+  "mejorasControlPagos": ["Mejora operativa/normativa 1", "Mejora 2", "Mejora 3"],
+  "riesgoCiclo": "CRÍTICO | ALTO | MEDIO | BAJO"
+}
+`;
+
+    const { response, modelUsed } = await callGeminiWithResilience(ai, {
+      contents: promptText,
+      config: { responseMimeType: 'application/json' },
+    });
+
+    const data = parseJsonSafe<any>(response.text || '{}', {
+      resumenCiclo: 'Análisis del ciclo de pagos completado.',
+      hallazgosCriticos: [],
+      mejorasControlPagos: [],
+      riesgoCiclo: 'MEDIO',
+    });
+
+    res.json({ success: true, modelUsed, data });
+  } catch (error: any) {
+    console.error('Error in /api/forensic/analyze-payment-cycle:', error);
+    res.status(500).json({ success: false, error: error.message || 'Error analizando el ciclo de pagos.' });
+  }
+});
+
+// =========================================================================
+// PERSISTENT CASES & ENTITIES REGISTRY ROUTES (Active Entity Filtered)
+// =========================================================================
+app.get('/api/cases', (req, res) => {
   const cases = readJsonDb<any[]>(CASES_DB_FILE, []);
-  res.json({ success: true, cases });
+  const entityId = typeof req.query.entityId === 'string' ? req.query.entityId : '';
+  const filtered = entityId ? cases.filter((c) => c.entity?.id === entityId) : cases;
+  res.json({ success: true, cases: filtered });
 });
 
 app.post('/api/cases', (req, res) => {
@@ -340,11 +825,8 @@ app.post('/api/cases', (req, res) => {
       timestamp: incoming.timestamp || now,
     };
 
-    if (idx >= 0) {
-      cases[idx] = record;
-    } else {
-      cases.unshift(record);
-    }
+    if (idx >= 0) cases[idx] = record;
+    else cases.unshift(record);
 
     writeJsonDb(CASES_DB_FILE, cases);
     res.json({ success: true, caseRecord: record, totalCases: cases.length });
@@ -382,9 +864,10 @@ app.post('/api/entities', (req, res) => {
       ...entity,
       id: entity.id || `ent-${Date.now()}`,
       creadaEn: entity.creadaEn || new Date().toISOString(),
+      actualizadaEn: new Date().toISOString(),
     };
     if (idx >= 0) entities[idx] = saved;
-    else entities.push(saved);
+    else entities.unshift(saved);
 
     writeJsonDb(ENTITIES_DB_FILE, entities);
     res.json({ success: true, entity: saved });
@@ -393,97 +876,146 @@ app.post('/api/entities', (req, res) => {
   }
 });
 
-// API Route: Multi-model Forensic Analysis
+app.delete('/api/entities/:id', (req, res) => {
+  try {
+    const { id } = req.params;
+    const entities = readJsonDb<any[]>(ENTITIES_DB_FILE, []);
+    const filteredEntities = entities.filter((e) => e.id !== id);
+    writeJsonDb(ENTITIES_DB_FILE, filteredEntities);
+
+    const cases = readJsonDb<any[]>(CASES_DB_FILE, []);
+    const filteredCases = cases.filter((c) => c.entity?.id !== id);
+    writeJsonDb(CASES_DB_FILE, filteredCases);
+
+    res.json({ success: true, totalEntities: filteredEntities.length });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/admin/reset-clean', (_req, res) => {
+  writeJsonDb(CASES_DB_FILE, []);
+  writeJsonDb(ENTITIES_DB_FILE, []);
+  res.json({ success: true, message: 'Base de datos limpiada para producción.' });
+});
+
+// =========================================================================
+// MAIN MULTI-MODEL FORENSIC ANALYSIS (Strictly Grounded in Supplied Real Data)
+// =========================================================================
 app.post('/api/forensic/analyze', async (req, res) => {
   try {
     const ai = getAiClient();
     if (!ai) {
       return res.status(503).json({
         success: false,
-        error: 'GEMINI_API_KEY no configurada en el servidor. Configure el secreto en AI Studio / entorno de producción.',
+        error: 'GEMINI_API_KEY no configurada en el servidor. Configure el secreto en Settings > Secrets.',
       });
     }
 
     const {
-      nombreCaso = 'Auditoria_General',
+      nombreCaso = 'Expediente_Forense',
       entidadNombre = 'Entidad Auditada',
+      entidadDescripcion = '',
       paisNormativa = 'República Dominicana',
       idioma = 'Español',
-      origenes = ['Contabilidad Central'],
-      requerimiento = 'Analizar adendas contractuales superiores al 50%',
+      origenes = [],
+      requerimiento = '',
       evidenciaSnippet = '',
-      anonimizar = true,
-      modelo = 'gemini-3.8-flash',
+      contractRows = [],
+      paymentCycleRows = [],
+      observaciones = [],
+      directors = [],
+      contraReplicas = [],
+      replicas = [],
+      recursos = [],
+      actaLectura = null,
+      informePreliminar = null,
+      anonimizar = false,
     } = req.body;
 
     const sanitizedReq = anonimizar ? anonymizeText(requerimiento) : requerimiento;
     const sanitizedSnippet = anonimizar && evidenciaSnippet ? anonymizeText(evidenciaSnippet) : evidenciaSnippet;
+    const segregationSnapshot = computeSegregatedResponsibility(
+      directors,
+      contractRows,
+      paymentCycleRows,
+      observaciones,
+      recursos,
+      replicas,
+      contraReplicas
+    );
 
     const promptText = `
-[INSTRUCCIÓN FORENSE SUPREMA - METODOLOGÍA R-C-T-F (Elite Top Big 4)]
-Rol: Director Global de Ingeniería Forense y Análisis Antifraude (Big 4: PwC, Deloitte, EY, KPMG).
-Entidad Auditada: ${entidadNombre}
+[INSTRUCCIÓN FORENSE SUPREMA - METODOLOGÍA R-C-T-F (Elite Big 4)]
+Rol: Director Global de Auditoría Forense, Ingeniería de Datos y Cumplimiento Normativo.
+Entidad Auditada (EXCLUSIVA DEL CASO): ${entidadNombre}
+Contexto / Antecedentes / Base Legal de la Entidad: ${entidadDescripcion ? entidadDescripcion.slice(0, 3000) : 'Según evidencia suministrada'}
 Jurisdicción / País: ${paisNormativa}
 Idioma de Respuesta: ${idioma}
 Caso: ${nombreCaso}
-Fuentes involucradas: ${origenes.join(', ')}
+Fuentes involucradas: ${origenes.join(', ') || 'Documentos digitales / Portal'}
 Requerimiento de auditoría: "${sanitizedReq}"
-${sanitizedSnippet ? `\n[CONTENIDO / MUESTRA REAL DE EVIDENCIA DIGITAL ADJUNTA]:\n${sanitizedSnippet.slice(0, 8000)}\n` : ''}
 
-Objetivo:
-1. Analizar la evidencia digital adjunta (PDF, Excel, Word, TXT o datos estructurados) junto con el requerimiento.
-2. Diseñar la estrategia pericial forense y detección de banderas rojas (red flags).
-3. Desarrollar un script en Python modular, altamente profesional, con pandas y hashlib, completamente ejecutable y libre de alucinaciones.
-4. Proporcionar un dictamen ejecutivo forense y fundamentación legal/normativa adaptada a ${paisNormativa} (NIA 240, COSO Antifraude, leyes nacionales aplicables).
+REGLA ESTRICTA:
+Basar TODO el análisis, cifras, hallazgos y mejoras ÚNICAMENTE en los datos reales suministrados a continuación. NO inventar contratos ni cifras ficticias.
 
-Devuelve tu respuesta estructurada exactamente en formato JSON con las siguientes claves:
+[CONTENIDO TEXTUAL LITERAL DESDE ORIGEN]:
+${sanitizedSnippet ? sanitizedSnippet.slice(0, 12000) : 'Sin texto adicional adjunto.'}
+
+[CONTRATOS REALES REGISTRADOS (${contractRows.length})]:
+${contractRows.length > 0 ? JSON.stringify(contractRows.slice(0, 40), null, 2) : 'Ninguno'}
+
+[CICLO DE PAGOS REAL REGISTRADO (${paymentCycleRows.length})]:
+${paymentCycleRows.length > 0 ? JSON.stringify(paymentCycleRows.slice(0, 40), null, 2) : 'Ninguno'}
+
+[OBSERVACIONES REGISTRADAS (${observaciones.length})]:
+${observaciones.length > 0 ? JSON.stringify(observaciones.slice(0, 20), null, 2) : 'Ninguna'}
+
+[SEGREGACIÓN DE RESPONSABILIDAD POR DIRECTORES Y DECRETOS (${directors.length})]:
+${directors.length > 0 ? JSON.stringify(segregationSnapshot.summaries, null, 2) : 'Sin directores segregados aún'}
+
+[DOSSIER CONTRADICTORIO MULTI-PERÍODO (ACTA / PRELIMINAR / RECURSOS / RÉPLICAS / CONTRA-RÉPLICAS)]:
+- Acta de Lectura: ${actaLectura?.titulo || 'No cargada'} (${actaLectura?.fecha || 'N/D'})
+- Informe Preliminar: ${informePreliminar?.titulo || 'No cargado'} (${informePreliminar?.fecha || 'N/D'})
+- Recursos (${recursos.length}), Réplicas (${replicas.length}), Contra-Réplicas (${contraReplicas.length})
+${contraReplicas.length > 0 ? `Detalle Contra-Réplicas:\n${JSON.stringify(contraReplicas.slice(0, 15).map((c: any) => ({ titulo: c.titulo, periodo: c.periodoEtiqueta, fecha: c.fecha, director: c.directorNombre, fuente: c.fuenteOrigen || c.urlOrigen, extracto: (c.contenido || '').slice(0, 350) })), null, 2)}` : ''}
+
+Devuelve JSON estricto con las siguientes claves:
 {
-  "resumenEjecutivo": "Texto con el resumen ejecutivo formal del caso, contexto, hallazgos sobre la evidencia y metodología pericial aplicada.",
-  "banderasRojas": ["Lista de 3 a 5 banderas rojas principales detectadas o a buscar en los datos"],
-  "codigoPython": "Código Python limpio, modular y comentado, listo para ser ejecutado con pandas",
-  "explicacionTecnica": "Explicación paso a paso de lo que hace el algoritmo forense y cómo aísla las anomalías",
-  "fundamentoLegal": "Citas a normas internacionales y locales vigentes de ${paisNormativa}",
+  "resumenEjecutivo": "Dictamen ejecutivo detallado basado estrictamente en los datos reales de la entidad.",
+  "banderasRojas": ["Lista de banderas rojas reales identificadas o puntos críticos de verificación según el texto/datos"],
+  "mejorasControlInterno": ["Recomendación concreta de mejora operativa/legal 1", "Mejora 2", "Mejora 3", "Mejora 4"],
+  "codigoPython": "Script Python modular con pandas y hashlib adaptado a los campos reales del caso para reproducir la auditoría",
+  "explicacionTecnica": "Explicación técnica del procedimiento forense aplicado sobre los datos suministrados",
+  "fundamentoLegal": "Artículos y leyes aplicables de ${paisNormativa} y normas NIA 240 / NIA 500 / ISO 27037",
   "metricasRiesgo": {
     "nivelRiesgo": "CRÍTICO | ALTO | MEDIO | MODERADO",
-    "exposicionEstimada": "Monto o impacto potencial estimado",
-    "accionInmediata": "Acción forense recomendada para congelar o preservar evidencia"
+    "exposicionEstimada": "Exposición monetaria real sumada de los datos o Pendiente de cuantificación",
+    "accionInmediata": "Acción forense concreta recomendada"
   }
 }
 `;
 
-    // Call Gemini Model
-    const geminiResponse = await ai.models.generateContent({
-      model: modelo || 'gemini-3.8-flash',
+    const { response, modelUsed } = await callGeminiWithResilience(ai, {
       contents: promptText,
       config: {
         responseMimeType: 'application/json',
       },
     });
 
-    const rawText = geminiResponse.text || '{}';
-    let parsedData: any = {};
-    try {
-      parsedData = JSON.parse(rawText);
-    } catch {
-      const jsonMatch = rawText.match(/```json\s*([\s\S]*?)\s*```/) || rawText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        parsedData = JSON.parse(jsonMatch[1] || jsonMatch[0]);
-      } else {
-        parsedData = {
-          resumenEjecutivo: rawText,
-          banderasRojas: ['Adendas superiores al umbral legal', 'Discrepancia en cronología contractual'],
-          codigoPython:
-            '# Script de análisis forense\nimport pandas as pd\n\ndef analizar(df):\n    return df[df["adenda_pct"] > 50]',
-          explicacionTecnica: 'Filtrado de contratos con incremento presupuestario anómalo.',
-          fundamentoLegal: `Normativa vigente de ${paisNormativa} y NIA 240.`,
-          metricasRiesgo: {
-            nivelRiesgo: 'ALTO',
-            exposicionEstimada: 'Indeterminada',
-            accionInmediata: 'Solicitar adendas originales foliadas',
-          },
-        };
-      }
-    }
+    const parsedData = parseJsonSafe<any>(response.text || '{}', {
+      resumenEjecutivo: response.text || 'Análisis completado.',
+      banderasRojas: ['Revisar documentación soporte y autorizaciones según normativa aplicable.'],
+      mejorasControlInterno: ['Fortalecer conciliación previa entre recepción, factura e-CF y libramiento de pago.'],
+      codigoPython: '# Script forense\nimport pandas as pd\n\ndef auditar(df):\n    return df',
+      explicacionTecnica: 'Evaluación documental y analítica sobre registros reales.',
+      fundamentoLegal: `Normativa vigente de ${paisNormativa} y NIA 240 / NIA 500.`,
+      metricasRiesgo: {
+        nivelRiesgo: 'ALTO',
+        exposicionEstimada: 'Según registros reales cargados',
+        accionInmediata: 'Preservación de expedientes originales y validación documental',
+      },
+    });
 
     let cleanedCode = parsedData.codigoPython || '';
     if (cleanedCode.includes('```python')) {
@@ -495,6 +1027,7 @@ Devuelve tu respuesta estructurada exactamente en formato JSON con las siguiente
 
     res.json({
       success: true,
+      modelUsed,
       timestamp: new Date().toISOString(),
       digitalHash,
       data: {
@@ -504,14 +1037,19 @@ Devuelve tu respuesta estructurada exactamente en formato JSON con las siguiente
     });
   } catch (error: any) {
     console.error('Error in /api/forensic/analyze:', error);
-    res.status(500).json({
+    const isOverloaded = isTransientAiError(error);
+    res.status(isOverloaded ? 503 : 500).json({
       success: false,
-      error: error.message || 'Error procesando el análisis forense con Gemini',
+      error: isOverloaded
+        ? 'El servicio de IA está experimentando un pico temporal de demanda. Por favor intente nuevamente en unos segundos.'
+        : error.message || 'Error procesando el análisis forense con Gemini',
     });
   }
 });
 
-// API Route: Evaluate Observation (SE_MANTIENE vs SE_ELIMINA vs SE_MODIFICA)
+// =========================================================================
+// EVALUATE CONTRADICTORY OBSERVATION
+// =========================================================================
 app.post('/api/forensic/evaluate-observation', async (req, res) => {
   try {
     const ai = getAiClient();
@@ -535,68 +1073,47 @@ app.post('/api/forensic/evaluate-observation', async (req, res) => {
 
     const promptText = `
 [EVALUACIÓN PERICIAL CONTRADICTORIA DE AUDITORÍA FORENSE]
-Rol: Magistrado / Auditor Forense Superior Elite Big 4 (PwC, Deloitte, EY, KPMG).
 Normativa y Jurisdicción Aplicable: ${paisNormativa}
 Idioma de Respuesta: ${idioma}
-Motor de Razonamiento Solicitado: ${motorIA.toUpperCase()}
+Motor Solicitado: ${motorIA.toUpperCase()}
 Auditor Responsable: ${usuario.nombre || 'Auditor'} (${usuario.cargo || 'Auditor'})
 
-[CONTEXTO DE EXPEDIENTE / ACTA DE LECTURA]:
-${actaLecturaContext ? actaLecturaContext.slice(0, 2000) : 'Sin antecedentes previos.'}
+[CONTEXTO / ACTA DE LECTURA]:
+${actaLecturaContext ? actaLecturaContext.slice(0, 2500) : 'Sin antecedentes previos.'}
 
-[RECURSOS DE RECONSIDERACIÓN / ALEGATOS PREVIOS]:
-${recursosContext ? recursosContext.slice(0, 2000) : 'Sin recursos adicionales.'}
+[RECURSOS / ALEGATOS]:
+${recursosContext ? recursosContext.slice(0, 2500) : 'Sin recursos adicionales.'}
 
-[OBSERVACIÓN O HALLAZGO EN DISPUTA]:
+[OBSERVACIÓN EN DISPUTA]:
 ${observacion}
 
-[DESCARGO / RÉPLICA / ELEMENTOS DE PRUEBA DEL AUDITADO]:
+[DESCARGO / PRUEBAS DEL AUDITADO]:
 ${descargoAlegato}
 
-OBJETIVO PERICIAL:
-Determinar de forma rigurosa y motivada si la observación:
-1. SE_MANTIENE: Si el descargo o justificación no desvirtúa la falta, subsiste daño patrimonial o hay infracción legal insubsanable.
-2. SE_ELIMINA: Si el auditado aportó prueba documental fehaciente, subsanó formalmente el hecho o amparó su actuación en causal de justificación legal plena.
-3. SE_MODIFICA: Si se desestima la gravedad original (ej. se descarta dolo), pero subsiste una debilidad de control interno o falta administrativa menor.
-
-Devuelve tu dictamen estructurado en formato JSON estricto con los siguientes campos:
+Devuelve JSON estricto:
 {
   "decision": "SE_MANTIENE | SE_ELIMINA | SE_MODIFICA",
-  "criterioEvaluacion": "Análisis probatorio detallado de por qué se acepta o rechaza el descargo presentado.",
-  "procedimientoUtilizado": "Técnicas y procedimientos de auditoría forense aplicados (ej. cotejo documental, conciliación bancaria, inspección física, cruce con bases de datos públicas).",
-  "fundamentacionLegal": "Citas textuales de artículos y leyes vigentes de ${paisNormativa} (ej. Ley de compras, código penal, normas de control interno o NIA 240/500).",
+  "criterioEvaluacion": "Análisis probatorio detallado basado en los hechos reales.",
+  "procedimientoUtilizado": "Técnicas y procedimientos de auditoría forense aplicados.",
+  "fundamentacionLegal": "Artículos y leyes vigentes de ${paisNormativa} aplicables.",
   "severidad": "CRÍTICA | ALTA | MEDIA | LEVE",
-  "resumenDictamen": "Síntesis ejecutiva de la resolución pericial para el Acta de Cierre."
+  "resumenDictamen": "Síntesis ejecutiva de la resolución pericial."
 }
 `;
 
-    const geminiResp = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+    const { response, modelUsed } = await callGeminiWithResilience(ai, {
       contents: promptText,
-      config: {
-        responseMimeType: 'application/json',
-      },
+      config: { responseMimeType: 'application/json' },
     });
 
-    const raw = geminiResp.text || '{}';
-    let result: any = {};
-    try {
-      result = JSON.parse(raw);
-    } catch {
-      const match = raw.match(/\{[\s\S]*\}/);
-      if (match) result = JSON.parse(match[0]);
-      else {
-        result = {
-          decision: 'SE_MANTIENE',
-          criterioEvaluacion:
-            'El descargo no aporta evidencias documentales suficientes para desvirtuar la observación.',
-          procedimientoUtilizado: 'Inspección documental y cruce normativo.',
-          fundamentacionLegal: `Normativa vigente de ${paisNormativa}`,
-          severidad: 'ALTA',
-          resumenDictamen: 'Observación confirmada en sede contradictoria.',
-        };
-      }
-    }
+    const result = parseJsonSafe<any>(response.text || '{}', {
+      decision: 'SE_MANTIENE',
+      criterioEvaluacion: 'El descargo no desvirtúa completamente la observación presentada.',
+      procedimientoUtilizado: 'Inspección documental y cruce normativo.',
+      fundamentacionLegal: `Normativa vigente de ${paisNormativa}`,
+      severidad: 'ALTA',
+      resumenDictamen: 'Observación evaluada en sede contradictoria.',
+    });
 
     const sha256 = crypto
       .createHash('sha256')
@@ -607,7 +1124,7 @@ Devuelve tu dictamen estructurado en formato JSON estricto con los siguientes ca
       success: true,
       data: result,
       sha256,
-      motorUtilizado: motorIA,
+      motorUtilizado: modelUsed,
       pais: paisNormativa,
       timestamp: new Date().toISOString(),
     });
@@ -620,7 +1137,9 @@ Devuelve tu dictamen estructurado en formato JSON estricto con los siguientes ca
   }
 });
 
-// API Route: Calculate Benford's Law distribution
+// =========================================================================
+// BENFORD'S LAW (Strictly on supplied real values — NO fake fallback numbers)
+// =========================================================================
 app.post('/api/forensic/benford', (req, res) => {
   try {
     const { values = [] } = req.body;
@@ -639,19 +1158,12 @@ app.post('/api/forensic/benford', (req, res) => {
     const counts: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0, 9: 0 };
     let validCount = 0;
 
-    const list: number[] =
-      Array.isArray(values) && values.length > 0
-        ? values
-        : [
-            12000, 15400, 18900, 19200, 14000, 11000, 16500, 22000, 28000, 29000, 24000,
-            31000, 38000, 35000, 42000, 49000, 45000, 51000, 58000, 62000, 75000, 83000,
-            91000, 89500, 89900, 89400, 89800, 89600, 89700,
-          ];
+    const list: number[] = Array.isArray(values) ? values : [];
 
     for (const val of list) {
       const num = Math.abs(Number(val));
       if (!isNaN(num) && num > 0) {
-        const firstDigit = parseInt(num.toString().replace(/[^0-9]/g, '')[0], 10);
+        const firstDigit = parseInt(num.toString().replace(/[^1-9]/g, '')[0] || '0', 10);
         if (firstDigit >= 1 && firstDigit <= 9) {
           counts[firstDigit]++;
           validCount++;
@@ -664,8 +1176,8 @@ app.post('/api/forensic/benford', (req, res) => {
       const observedCount = counts[digit];
       const observedPct = validCount > 0 ? Number(((observedCount / validCount) * 100).toFixed(2)) : 0;
       const expectedPct = theoretical[digit];
-      const diff = Number((observedPct - expectedPct).toFixed(2));
-      const isAnomaly = Math.abs(diff) > 5.0;
+      const diff = validCount > 0 ? Number((observedPct - expectedPct).toFixed(2)) : 0;
+      const isAnomaly = validCount >= 10 && Math.abs(diff) > 5.0;
       return {
         digit,
         observedCount,
@@ -684,6 +1196,741 @@ app.post('/api/forensic/benford', (req, res) => {
     });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// =========================================================================
+// DETERMINISTIC RESPONSIBILITY SEGREGATION HELPER
+// =========================================================================
+function normalizeIsoDate(d: string | undefined): string {
+  if (!d) return '';
+  const m = String(d).trim().match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+  const m2 = String(d).trim().match(/(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/);
+  if (m2) return `${m2[3]}-${m2[2].padStart(2, '0')}-${m2[1].padStart(2, '0')}`;
+  return '';
+}
+
+function dateInTenure(dateStr: string | undefined, startStr: string | undefined, endStr: string | undefined, isCurrent?: boolean): boolean {
+  const d = normalizeIsoDate(dateStr);
+  const start = normalizeIsoDate(startStr);
+  const end = isCurrent ? '9999-12-31' : (normalizeIsoDate(endStr) || '9999-12-31');
+  if (!d || !start) return false;
+  return d >= start && d <= end;
+}
+
+function computeSegregatedResponsibility(
+  directors: any[] = [],
+  contractRows: any[] = [],
+  paymentCycleRows: any[] = [],
+  observaciones: any[] = [],
+  recursos: any[] = [],
+  replicas: any[] = [],
+  contraReplicas: any[] = []
+) {
+  const assignedContractIds = new Set<string>();
+  const assignedPaymentIds = new Set<string>();
+  const assignedObsIds = new Set<string>();
+
+  const summaries = (Array.isArray(directors) ? directors : []).map((dir: any) => {
+    const start = normalizeIsoDate(dir.fechaInicioGestion);
+    const end = dir.enFuncionesActuales ? 'Actualidad' : (normalizeIsoDate(dir.fechaFinGestion) || 'Sin fecha cierre');
+
+    const matchedContracts = (Array.isArray(contractRows) ? contractRows : []).filter((c: any) => {
+      const targetDate = c.fechaAdenda || c.fechaContrato;
+      const match = dateInTenure(targetDate, dir.fechaInicioGestion, dir.fechaFinGestion, dir.enFuncionesActuales);
+      if (match) assignedContractIds.add(c.id);
+      return match;
+    });
+
+    const matchedPayments = (Array.isArray(paymentCycleRows) ? paymentCycleRows : []).filter((p: any) => {
+      const targetDate = p.fechaPago || p.fechaFactura || p.fechaSolicitud;
+      const match = dateInTenure(targetDate, dir.fechaInicioGestion, dir.fechaFinGestion, dir.enFuncionesActuales);
+      if (match) assignedPaymentIds.add(p.id);
+      return match;
+    });
+
+    const matchedObs = (Array.isArray(observaciones) ? observaciones : []).filter((o: any) => {
+      const directMatch = o.directorId && o.directorId === dir.id;
+      const dateMatch = o.fechaHecho
+        ? dateInTenure(o.fechaHecho, dir.fechaInicioGestion, dir.fechaFinGestion, dir.enFuncionesActuales)
+        : false;
+      const match = Boolean(directMatch || dateMatch);
+      if (match) assignedObsIds.add(o.id);
+      return match;
+    });
+
+    const matchedReplicas = (Array.isArray(replicas) ? replicas : []).filter(
+      (r: any) =>
+        (r.directorId && r.directorId === dir.id) ||
+        dateInTenure(r.fecha, dir.fechaInicioGestion, dir.fechaFinGestion, dir.enFuncionesActuales)
+    );
+
+    const matchedContraReplicas = (Array.isArray(contraReplicas) ? contraReplicas : []).filter(
+      (cr: any) =>
+        (cr.directorId && cr.directorId === dir.id) ||
+        dateInTenure(cr.fecha, dir.fechaInicioGestion, dir.fechaFinGestion, dir.enFuncionesActuales)
+    );
+
+    const contratosMonto = matchedContracts.reduce((acc: number, c: any) => acc + (Number(c.montoOriginal) || 0), 0);
+    const adendasMonto = matchedContracts.reduce((acc: number, c: any) => acc + (Number(c.montoAdenda) || 0), 0);
+    const pagosMontoNeto = matchedPayments.reduce((acc: number, p: any) => acc + (Number(p.montoPagadoNeto) || 0), 0);
+    const observacionesMonto = matchedObs.reduce((acc: number, o: any) => acc + (Number(o.montoInvolucrado) || 0), 0);
+
+    const anomalousContracts = matchedContracts.filter((c: any) => c.esAnomalo).length;
+    const irregularPayments = matchedPayments.filter((p: any) => p.estadoCiclo && p.estadoCiclo !== 'COMPLETO').length;
+    const keptObs = matchedObs.filter((o: any) => o.decision === 'SE_MANTIENE').length;
+
+    let riesgoCalculado: 'CRÍTICO' | 'ALTO' | 'MEDIO' | 'BAJO' = 'BAJO';
+    if (anomalousContracts >= 2 || keptObs >= 2 || irregularPayments >= 3) riesgoCalculado = 'CRÍTICO';
+    else if (anomalousContracts >= 1 || keptObs >= 1 || irregularPayments >= 1 || adendasMonto > 0) riesgoCalculado = 'ALTO';
+    else if (matchedContracts.length > 0 || matchedPayments.length > 0) riesgoCalculado = 'MEDIO';
+
+    return {
+      directorId: dir.id,
+      directorNombre: dir.nombre || 'Titular sin nombre',
+      cargo: dir.cargo || 'Director/a General',
+      periodoGestion: `${start || 'N/D'} → ${end}`,
+      numeroDecreto: dir.numeroDecretoNombramiento || 'Sin decreto vinculado',
+      fuentesCount: Array.isArray(dir.fuentes) ? dir.fuentes.length : 0,
+      contratosCount: matchedContracts.length,
+      contratosMonto,
+      adendasMonto,
+      pagosCount: matchedPayments.length,
+      pagosMontoNeto,
+      observacionesCount: matchedObs.length,
+      observacionesMonto,
+      replicasCount: matchedReplicas.length,
+      contraReplicasCount: matchedContraReplicas.length,
+      riesgoCalculado,
+      resumenResponsabilidad: `${matchedContracts.length} contrato(s), ${matchedPayments.length} pago(s), ${matchedObs.length} observación(es), ${matchedReplicas.length} réplica(s), ${matchedContraReplicas.length} contra-réplica(s).`,
+    };
+  });
+
+  const orphanStats = {
+    contratosSinDirector: (Array.isArray(contractRows) ? contractRows : []).filter((c: any) => !assignedContractIds.has(c.id)).length,
+    pagosSinDirector: (Array.isArray(paymentCycleRows) ? paymentCycleRows : []).filter((p: any) => !assignedPaymentIds.has(p.id)).length,
+    observacionesSinDirector: (Array.isArray(observaciones) ? observaciones : []).filter((o: any) => !assignedObsIds.has(o.id)).length,
+    totalRecursos: Array.isArray(recursos) ? recursos.length : 0,
+  };
+
+  return { summaries, orphanStats };
+}
+
+// =========================================================================
+// ONLINE AI SEARCH FOR OFFICIAL APPOINTMENT DECREES (Google Search Grounding)
+// =========================================================================
+app.post('/api/forensic/search-appointment-decrees', async (req, res) => {
+  try {
+    const ai = getAiClient();
+    if (!ai) {
+      return res.status(503).json({
+        success: false,
+        error: 'GEMINI_API_KEY no configurada en el servidor.',
+      });
+    }
+
+    const {
+      entityName = '',
+      entitySiglas = '',
+      rncNif = '',
+      paisNormativa = 'República Dominicana',
+      periodoDesde = '',
+      periodoHasta = '',
+      directorNameQuery = '',
+    } = req.body;
+
+    if (!entityName.trim() && !directorNameQuery.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Debe indicar al menos el nombre de la entidad o de un funcionario para buscar decretos oficiales.',
+      });
+    }
+
+    const promptText = `
+[BÚSQUEDA OFICIAL EN LÍNEA DE DECRETOS DE NOMBRAMIENTO Y RELEVO]
+Eres un investigador jurídico y de auditoría gubernamental. Utiliza la búsqueda web oficial disponible para localizar DECRETOS PRESIDENCIALES, RESOLUCIONES O ACTOS ADMINISTRATIVOS OFICIALES DE NOMBRAMIENTO Y SUSTITUCIÓN de los Directores / Titulares de:
+- Entidad: "${entityName}" ${entitySiglas ? `(${entitySiglas})` : ''} ${rncNif ? `RNC/NIF: ${rncNif}` : ''}
+- País / Jurisdicción: ${paisNormativa}
+- Rango de períodos de interés: ${periodoDesde || 'Histórico reciente'} hasta ${periodoHasta || 'Actualidad'}
+${directorNameQuery ? `- Funcionario / Director específico consultado: "${directorNameQuery}"` : ''}
+
+REGLAS ESTRICTAS DE RIGOR Y TRAZABILIDAD:
+1. Busca exclusivamente en fuentes reales encontradas en la web (Presidencia, Consultoría Jurídica del Poder Ejecutivo, Gaceta Oficial, MAP, portales de transparencia o prensa oficial verificable).
+2. NO inventes números de decreto, fechas ni nombres si no aparecen en las fuentes recuperadas. Si un dato no consta claramente, indícalo como "Por verificar en Gaceta".
+3. Devuelve ÚNICAMENTE un bloque JSON válido envuelto en \`\`\`json ... \`\`\` con esta estructura exacta:
+\`\`\`json
+{
+  "notaBusqueda": "Resumen breve de los decretos y períodos localizados en línea.",
+  "directoresEncontrados": [
+    {
+      "nombre": "Nombre completo oficial del director/titular",
+      "cargo": "Cargo oficial según decreto",
+      "numeroDecretoNombramiento": "Ej: Decreto No. 329-20 (o 'Por verificar')",
+      "fechaDecretoNombramiento": "YYYY-MM-DD (o vacío si no consta día exacto)",
+      "fechaInicioGestion": "YYYY-MM-DD",
+      "fechaFinGestion": "YYYY-MM-DD o vacío si sigue en funciones",
+      "enFuncionesActuales": false,
+      "numeroDecretoSalida": "Decreto de relevo/sustitución si consta o vacío",
+      "fechaDecretoSalida": "YYYY-MM-DD o vacío",
+      "ubicacionOrigen": "Consultoría Jurídica / Presidencia / Portal Oficial / Diario",
+      "extractoLiteral": "Cita o resumen textual del artículo del decreto que dispone la designación.",
+      "urlSugerida": "URL de la fuente consultada si se conoce exactamente"
+    }
+  ]
+}
+\`\`\`
+`;
+
+    let rawText = '';
+    let modelUsed = 'gemini-4-hydrogen';
+    let groundingMetadata: any = null;
+    const nowIso = new Date().toISOString();
+    let fallbackWebSources: any[] = [];
+
+    try {
+      const result = await callGeminiWithResilience(ai, {
+        contents: promptText,
+        config: {
+          tools: [{ googleSearch: {} }],
+        },
+      });
+      rawText = result.response.text || '';
+      modelUsed = result.modelUsed;
+      groundingMetadata = result.response.candidates?.[0]?.groundingMetadata;
+    } catch (searchErr: any) {
+      console.warn('Google Search Grounding unavailable/quota, activating real public web search fallback:', searchErr?.message || searchErr);
+
+      // Tier 2: Real public web search fallback (DuckDuckGo Lite / Wikipedia API) -> NO fabricated URLs
+      const queryStr = `${entityName} ${entitySiglas} decreto nombramiento director ${paisNormativa}`.trim();
+      const collectedSnippets: string[] = [];
+
+      try {
+        const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(queryStr)}`;
+        const ddgCtrl = new AbortController();
+        const ddgTimer = setTimeout(() => ddgCtrl.abort(), 10000);
+        const ddgResp = await fetch(ddgUrl, {
+          signal: ddgCtrl.signal,
+          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ForensicAuditSearch/1.0)' },
+        });
+        clearTimeout(ddgTimer);
+
+        if (ddgResp.ok) {
+          const html = await ddgResp.text();
+          const resultRegex = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+          let m: RegExpExecArray | null;
+          let idx = 0;
+          while ((m = resultRegex.exec(html)) !== null && idx < 8) {
+            let href = m[1];
+            if (href.includes('uddg=')) {
+              try {
+                const u = new URL(href.startsWith('//') ? `https:${href}` : href);
+                href = decodeURIComponent(u.searchParams.get('uddg') || href);
+              } catch {}
+            }
+            const title = m[2].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+            const snippet = m[3].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+            if (href && /^https?:\/\//i.test(href)) {
+              const sha256 = crypto.createHash('sha256').update(`${href}_${title}_${nowIso}`).digest('hex');
+              fallbackWebSources.push({
+                id: `src-web-fb-${Date.now()}-${idx}`,
+                url: href,
+                titulo: title,
+                ubicacionOrigen: `Búsqueda Web Verificada (${new URL(href).hostname})`,
+                fechaConsulta: nowIso,
+                sha256,
+                verificadoWeb: true,
+              });
+              collectedSnippets.push(`[FUENTE ${idx + 1}] Título: ${title}\nURL: ${href}\nExtracto: ${snippet}`);
+              idx++;
+            }
+          }
+        }
+      } catch (ddgErr) {
+        console.warn('DuckDuckGo fallback skipped:', ddgErr);
+      }
+
+      if (collectedSnippets.length === 0) {
+        try {
+          const wikiApi = `https://es.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(`${entityName} ${directorNameQuery}`.trim())}&format=json&srlimit=5`;
+          const wResp = await fetch(wikiApi);
+          if (wResp.ok) {
+            const wJson: any = await wResp.json();
+            const hits = wJson?.query?.search || [];
+            hits.forEach((h: any, idx: number) => {
+              const pageUrl = `https://es.wikipedia.org/wiki/${encodeURIComponent(String(h.title || '').replace(/\s+/g, '_'))}`;
+              const cleanSnippet = String(h.snippet || '').replace(/<[^>]+>/g, '');
+              const sha256 = crypto.createHash('sha256').update(`${pageUrl}_${h.title}_${nowIso}`).digest('hex');
+              fallbackWebSources.push({
+                id: `src-wiki-${Date.now()}-${idx}`,
+                url: pageUrl,
+                titulo: h.title,
+                ubicacionOrigen: 'Wikipedia Pública (Referencia Secundaria)',
+                fechaConsulta: nowIso,
+                sha256,
+                verificadoWeb: true,
+              });
+              collectedSnippets.push(`[FUENTE ${idx + 1}] Título: ${h.title}\nURL: ${pageUrl}\nExtracto: ${cleanSnippet}`);
+            });
+          }
+        } catch {}
+      }
+
+      if (collectedSnippets.length > 0) {
+        const extractPrompt = `
+[EXTRACCIÓN DE DECRETOS Y DIRECTORES DESDE FUENTES WEB RECUPERADAS]
+Entidad: ${entityName} (${entitySiglas})
+País: ${paisNormativa}
+Rango: ${periodoDesde || 'N/D'} a ${periodoHasta || 'Actualidad'}
+
+FUENTES WEB REALES RECUPERADAS:
+${collectedSnippets.join('\n\n')}
+
+REGLA ESTRICTA: Extrae ÚNICAMENTE directores, decretos, fechas y URLs que consten explícitamente en las FUENTES WEB REALES RECUPERADAS arriba. NO inventes decretos ni URLs.
+Devuelve JSON estricto con la clave "notaBusqueda" y el arreglo "directoresEncontrados".
+`;
+        try {
+          const fallbackAi = await callGeminiWithResilience(ai, {
+            contents: extractPrompt,
+            config: { responseMimeType: 'application/json' },
+          });
+          rawText = fallbackAi.response.text || '';
+          modelUsed = `${fallbackAi.modelUsed} (web-fallback)`;
+        } catch (aiFbErr: any) {
+          rawText = JSON.stringify({
+            notaBusqueda: `Se recuperaron ${fallbackWebSources.length} fuentes web reales. Limite de cuota IA alcanzado al estructurar; revise las fuentes abajo y use "Extraer Fuente".`,
+            directoresEncontrados: [],
+          });
+          modelUsed = 'web-sources-only';
+        }
+      } else {
+        const errMsg = String(searchErr?.message || '');
+        const isQuota = errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED');
+        return res.status(isQuota ? 429 : 503).json({
+          success: false,
+          error: isQuota
+            ? 'La cuota de Google Search Grounding alcanzó su límite temporal (429). Puede agregar manualmente la URL de Gaceta/Presidencia abajo y usar "Ver Contenido Origen" o subir el decreto.'
+            : 'El buscador oficial en línea no pudo recuperar resultados en este momento. Intente nuevamente o ingrese la fuente del decreto manualmente.',
+        });
+      }
+    }
+
+    const parsed = parseJsonSafe<any>(rawText, {
+      notaBusqueda: rawText.slice(0, 600),
+      directoresEncontrados: [],
+    });
+
+    const rawChunks = groundingMetadata?.groundingChunks || [];
+    const searchQueries: string[] = groundingMetadata?.webSearchQueries || [];
+
+    const groundedSources = rawChunks
+      .filter((c: any) => c?.web?.uri)
+      .map((c: any, idx: number) => {
+        const uri = String(c.web.uri);
+        const title = String(c.web.title || uri);
+        const sha256 = crypto
+          .createHash('sha256')
+          .update(`${uri}_${title}_${nowIso}`)
+          .digest('hex');
+        return {
+          id: `src-web-${Date.now()}-${idx}`,
+          url: uri,
+          titulo: title,
+          ubicacionOrigen: `Google Search Grounding (${title})`,
+          fechaConsulta: nowIso,
+          sha256,
+          verificadoWeb: true,
+        };
+      });
+
+    const webSources = groundedSources.length > 0 ? groundedSources : fallbackWebSources;
+
+    const directorsNormalized = (Array.isArray(parsed.directoresEncontrados) ? parsed.directoresEncontrados : []).map(
+      (d: any, idx: number) => {
+        const matchedSource = webSources[idx] || webSources[0] || null;
+        const sourceUrl = d.urlSugerida && /^https?:\/\//i.test(d.urlSugerida)
+          ? d.urlSugerida
+          : matchedSource?.url || '';
+        const sourceTitle = matchedSource?.titulo || d.ubicacionOrigen || `Fuente Oficial Decreto ${d.numeroDecretoNombramiento || idx + 1}`;
+        const decreeText = d.extractoLiteral || `Designación registrada en ${d.numeroDecretoNombramiento || 'decreto oficial'}.`;
+        const srcHash = crypto
+          .createHash('sha256')
+          .update(`${d.nombre || ''}_${d.numeroDecretoNombramiento || ''}_${sourceUrl}_${nowIso}`)
+          .digest('hex');
+
+        return {
+          id: `dir-ia-${Date.now()}-${idx}`,
+          nombre: d.nombre || 'Por verificar',
+          cedulaId: '',
+          cargo: d.cargo || 'Director General',
+          periodoNumero: idx + 1,
+          fechaInicioGestion: normalizeIsoDate(d.fechaInicioGestion) || normalizeIsoDate(d.fechaDecretoNombramiento) || '',
+          fechaFinGestion: normalizeIsoDate(d.fechaFinGestion) || normalizeIsoDate(d.fechaDecretoSalida) || '',
+          enFuncionesActuales: Boolean(d.enFuncionesActuales),
+          numeroDecretoNombramiento: d.numeroDecretoNombramiento || 'Por verificar',
+          fechaDecretoNombramiento: normalizeIsoDate(d.fechaDecretoNombramiento) || '',
+          numeroDecretoSalida: d.numeroDecretoSalida || '',
+          fechaDecretoSalida: normalizeIsoDate(d.fechaDecretoSalida) || '',
+          fuentes: [
+            {
+              id: `dec-src-${Date.now()}-${idx}`,
+              url: sourceUrl,
+              titulo: sourceTitle,
+              ubicacionOrigen: d.ubicacionOrigen || matchedSource?.ubicacionOrigen || 'Búsqueda Oficial en Línea (IA Grounding)',
+              numeroDecreto: d.numeroDecretoNombramiento || 'Por verificar',
+              fechaDecreto: normalizeIsoDate(d.fechaDecretoNombramiento) || '',
+              extractoLiteral: decreeText,
+              fechaConsulta: nowIso,
+              sha256: srcHash,
+              verificadoWeb: Boolean(sourceUrl),
+            },
+          ],
+          responsabilidadObservaciones: `Gestión vinculada al ${d.numeroDecretoNombramiento || 'decreto oficial'} (${d.fechaInicioGestion || 'N/D'} a ${d.enFuncionesActuales ? 'Actualidad' : d.fechaFinGestion || 'N/D'}).`,
+          notas: decreeText,
+        };
+      }
+    );
+
+    res.json({
+      success: true,
+      modelUsed,
+      notaBusqueda: parsed.notaBusqueda || 'Búsqueda oficial de decretos completada.',
+      searchQueries,
+      webSources,
+      directoresEncontrados: directorsNormalized,
+      timestamp: nowIso,
+    });
+  } catch (error: any) {
+    console.error('Error in /api/forensic/search-appointment-decrees:', error);
+    res.status(isTransientAiError(error) ? 503 : 500).json({
+      success: false,
+      error: error.message || 'Error consultando decretos oficiales en línea.',
+    });
+  }
+});
+
+// =========================================================================
+// SEGREGATE RESPONSIBILITY BY DIRECTOR & PERIOD (Cross-Match + AI)
+// =========================================================================
+app.post('/api/forensic/segregate-responsibility', async (req, res) => {
+  try {
+    const {
+      entityName = 'Entidad Auditada',
+      paisNormativa = 'República Dominicana',
+      idioma = 'Español',
+      directors = [],
+      contractRows = [],
+      paymentCycleRows = [],
+      observaciones = [],
+      recursos = [],
+      replicas = [],
+      contraReplicas = [],
+      useAiSummary = true,
+    } = req.body;
+
+    const { summaries, orphanStats } = computeSegregatedResponsibility(
+      directors,
+      contractRows,
+      paymentCycleRows,
+      observaciones,
+      recursos,
+      replicas,
+      contraReplicas
+    );
+
+    let aiNarrative = '';
+    let modelUsed = 'deterministic-engine';
+
+    const ai = getAiClient();
+    if (ai && useAiSummary && summaries.length > 0) {
+      try {
+        const promptText = `
+[DICTAMEN DE SEGREGACIÓN DE RESPONSABILIDAD ADMINISTRATIVA POR PERÍODOS Y DIRECTORES]
+Entidad: ${entityName}
+Jurisdicción: ${paisNormativa}
+Idioma: ${idioma}
+
+Matriz Calculada por Director y Decreto Oficial:
+${JSON.stringify(summaries, null, 2)}
+
+Registros Huérfanos / Fuera de Rango de Decreto:
+${JSON.stringify(orphanStats, null, 2)}
+
+Redacta una síntesis ejecutiva técnica (máximo 12 líneas) que individualice la responsabilidad de cada Director según las fechas exactas de su decreto de nombramiento y sustitución, advirtiendo sobre cualquier acto sin titular asignado y sobre la trazabilidad entre réplicas y contra-réplicas.
+`;
+        const aiResp = await callGeminiWithResilience(ai, { contents: promptText });
+        aiNarrative = (aiResp.response.text || '').trim();
+        modelUsed = aiResp.modelUsed;
+      } catch (aiErr) {
+        console.warn('AI narrative skipped in segregate-responsibility:', aiErr);
+      }
+    }
+
+    res.json({
+      success: true,
+      modelUsed,
+      summaries,
+      orphanStats,
+      aiNarrative,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message || 'Error segregando responsabilidades.' });
+  }
+});
+
+// =========================================================================
+// INTERACTIVE PRE-REVIEW RUNNER (Acta de Lectura, Informe Preliminar, Final)
+// =========================================================================
+app.post('/api/forensic/pre-review-document', async (req, res) => {
+  try {
+    const {
+      tipoDocumento = 'ACTA_LECTURA',
+      entity = null,
+      periodo = null,
+      auditor = null,
+      paisNormativa = 'República Dominicana',
+      idioma = 'Español',
+      actaLectura = null,
+      informePreliminar = null,
+      recursos = [],
+      replicas = [],
+      contraReplicas = [],
+      directors = [],
+      contractRows = [],
+      paymentCycleRows = [],
+      observaciones = [],
+      resultado = null,
+    } = req.body;
+
+    // 1. Deterministic Real-Data QA Gate Checks
+    const deterministicChecks: {
+      id: string;
+      criterio: string;
+      estado: 'CUMPLE' | 'ATENCION' | 'CRITICO';
+      detalle: string;
+      recomendacion: string;
+    }[] = [];
+
+    const segregation = computeSegregatedResponsibility(
+      directors,
+      contractRows,
+      paymentCycleRows,
+      observaciones,
+      recursos,
+      replicas,
+      contraReplicas
+    );
+
+    const hasEntity = Boolean(entity?.nombre);
+    const hasAuditor = Boolean(auditor?.nombre && auditor?.cedulaId);
+    deterministicChecks.push({
+      id: 'chk-identidad',
+      criterio: 'Identificación de Entidad, Auditor y Período',
+      estado: hasEntity && hasAuditor ? 'CUMPLE' : 'ATENCION',
+      detalle: hasEntity
+        ? `Entidad: ${entity.nombre}. Auditor: ${auditor?.nombre || 'Sin asignar'} (ID: ${auditor?.cedulaId || 'N/D'}). Período: ${periodo?.fechaDesde || 'N/D'} a ${periodo?.fechaHasta || 'N/D'}.`
+        : 'Falta registrar entidad auditada o identificación completa del perito.',
+      recomendacion: hasEntity && hasAuditor ? 'Datos de identidad completos.' : 'Complete cédula/ID del auditor y RNC de la entidad antes de emitir.',
+    });
+
+    if (tipoDocumento === 'ACTA_LECTURA') {
+      const len = (actaLectura?.contenido || '').trim().length;
+      const filesCount = actaLectura?.archivos?.length || 0;
+      deterministicChecks.push({
+        id: 'chk-acta-body',
+        criterio: 'Constancia de Lectura, Comparecientes y Plazo Legal',
+        estado: len >= 60 ? 'CUMPLE' : len > 0 ? 'ATENCION' : 'CRITICO',
+        detalle: `Extensión del acta: ${len} caracteres. Archivos digitales foliados: ${filesCount}.`,
+        recomendacion: len >= 60 ? 'Acta documentada con contenido verificable.' : 'Redacte o adjunte el texto íntegro del Acta de Lectura con fecha y firmantes.',
+      });
+      deterministicChecks.push({
+        id: 'chk-acta-dir',
+        criterio: 'Notificación Vinculada a Titular / Director del Período',
+        estado: actaLectura?.directorNombre || directors.length > 0 ? 'CUMPLE' : 'ATENCION',
+        detalle: actaLectura?.directorNombre
+          ? `Director vinculado: ${actaLectura.directorNombre}.`
+          : `Directores en expediente: ${directors.length}. No se ha asignado titular específico al Acta.`,
+        recomendacion: 'Vincule el Acta al Director notificado según su Decreto de nombramiento vigente.',
+      });
+    } else if (tipoDocumento === 'INFORME_PRELIMINAR') {
+      const len = (informePreliminar?.contenido || '').trim().length;
+      const obsCount = observaciones.length;
+      deterministicChecks.push({
+        id: 'chk-prelim-body',
+        criterio: 'Pliego Preliminar de Cargos y Evidencia Soporte',
+        estado: len >= 60 || obsCount > 0 ? 'CUMPLE' : 'CRITICO',
+        detalle: `Texto preliminar: ${len} caracteres. Observaciones estructuradas: ${obsCount}. Contratos: ${contractRows.length}, Pagos: ${paymentCycleRows.length}.`,
+        recomendacion: obsCount > 0 ? 'Cargos estructurados listos para contradicción.' : 'Cargue o extraiga al menos una observación formal preliminar.',
+      });
+      deterministicChecks.push({
+        id: 'chk-prelim-seg',
+        criterio: 'Segregación Cronológica por Directores y Decretos',
+        estado:
+          directors.length > 0 && segregation.orphanStats.observacionesSinDirector === 0
+            ? 'CUMPLE'
+            : directors.length > 0
+            ? 'ATENCION'
+            : 'CRITICO',
+        detalle: `Directores registrados: ${directors.length}. Contratos sin asignar: ${segregation.orphanStats.contratosSinDirector}, Observaciones sin asignar: ${segregation.orphanStats.observacionesSinDirector}.`,
+        recomendacion: 'Busque o registre los decretos oficiales de nombramiento para asignar cada hallazgo al director exacto del período.',
+      });
+    } else {
+      // INFORME_FINAL
+      const hasDictamen = Boolean(resultado?.resumenEjecutivo);
+      const pendingDescargos = replicas.length + contraReplicas.length > 0 && observaciones.length === 0;
+      deterministicChecks.push({
+        id: 'chk-final-dictamen',
+        criterio: 'Dictamen Ejecutivo y Sello Criptográfico SHA-256',
+        estado: hasDictamen ? 'CUMPLE' : 'CRITICO',
+        detalle: hasDictamen
+          ? `Dictamen emitido con hash ${resultado.digitalHash?.slice(0, 14)}...`
+          : 'No se ha ejecutado aún el Dictamen IA Integral del Paso 5.',
+        recomendacion: hasDictamen ? 'Dictamen generado.' : 'Ejecute el Análisis Forense Final antes de emitir el Informe Final.',
+      });
+      deterministicChecks.push({
+        id: 'chk-final-contradiccion',
+        criterio: 'Cobertura de Recursos, Réplicas y Contra-Réplicas Multi-Período',
+        estado: pendingDescargos ? 'CRITICO' : 'CUMPLE',
+        detalle: `Recursos: ${recursos.length} | Réplicas: ${replicas.length} | Contra-Réplicas: ${contraReplicas.length} | Observaciones resueltas: ${observaciones.length}.`,
+        recomendacion: pendingDescargos
+          ? 'Existen réplicas/contra-réplicas cargadas sin observaciones evaluadas. Resuelva cada observación en el Paso 4.'
+          : 'Ciclo contradictorio debidamente ponderado.',
+      });
+      deterministicChecks.push({
+        id: 'chk-final-directores',
+        criterio: 'Individualización de Responsabilidad por Decreto Oficial',
+        estado: directors.length > 0 ? 'CUMPLE' : 'ATENCION',
+        detalle: `${directors.length} director(es) documentado(s) con fuentes y decretos de nombramiento.`,
+        recomendacion: directors.length > 0 ? 'Responsabilidad segregada por período.' : 'Ejecute la búsqueda de decretos oficiales para individualizar responsabilidad.',
+      });
+    }
+
+    // 2. Deep AI Interactive QA Inspection
+    const ai = getAiClient();
+    let aiPayload: any = null;
+    let modelUsed = 'deterministic-qa-gate';
+
+    if (ai) {
+      try {
+        const docFocus =
+          tipoDocumento === 'ACTA_LECTURA'
+            ? actaLectura
+            : tipoDocumento === 'INFORME_PRELIMINAR'
+            ? informePreliminar
+            : {
+                resultado,
+                observaciones: observaciones.slice(0, 15),
+                recursos: recursos.map((r: any) => ({ titulo: r.titulo, fecha: r.fecha, periodo: r.periodoEtiqueta, contenido: (r.contenido || '').slice(0, 500) })),
+                replicas: replicas.map((r: any) => ({ titulo: r.titulo, fecha: r.fecha, periodo: r.periodoEtiqueta, director: r.directorNombre, contenido: (r.contenido || '').slice(0, 500) })),
+                contraReplicas: contraReplicas.map((r: any) => ({ titulo: r.titulo, fecha: r.fecha, periodo: r.periodoEtiqueta, director: r.directorNombre, contenido: (r.contenido || '').slice(0, 500) })),
+              };
+
+        const promptText = `
+[EJECUTOR INTERACTIVO DE REVISIÓN PREVIA DE CONTROL DE CALIDAD FORENSE]
+Documento bajo Revisión Previa: ${tipoDocumento}
+Entidad: ${entity?.nombre || 'Entidad Auditada'} (${entity?.siglas || ''})
+País / Normativa: ${paisNormativa}
+Idioma: ${idioma}
+
+Chequeos Programáticos Previos:
+${JSON.stringify(deterministicChecks, null, 2)}
+
+Segregación de Directores Actual (${directors.length}):
+${JSON.stringify(segregation.summaries, null, 2)}
+
+Contenido Real del Documento Evaluado:
+${JSON.stringify(docFocus, null, 2).slice(0, 18000)}
+
+Evalúa rigurosamente si este documento (${tipoDocumento}) cumple estándares Big 4, NIA 240/500 e ISO 27037 antes de notificarse o emitirse.
+Devuelve JSON estricto:
+{
+  "puntuacionPreparacion": 82,
+  "estadoAprobacion": "APROBADO_REVISION | CON_OBSERVACIONES_PREVIAS | BLOQUEADO",
+  "resumenEjecutivo": "Veredicto claro de la revisión previa sobre los datos reales encontrados.",
+  "hallazgosAdicionales": [
+    {
+      "criterio": "Nombre del criterio técnico o legal revisado",
+      "estado": "CUMPLE | ATENCION | CRITICO",
+      "detalle": "Hallazgo específico en el texto o datos reales",
+      "recomendacion": "Corrección concreta antes de firma/emisión"
+    }
+  ],
+  "mejorasSugeridas": ["Mejora puntual 1", "Mejora puntual 2", "Mejora puntual 3"],
+  "textoMejoradoSugerido": "Borrador técnico breve o cláusula de refuerzo lista para incorporar al documento evaluado."
+}
+`;
+        const aiResp = await callGeminiWithResilience(ai, {
+          contents: promptText,
+          config: { responseMimeType: 'application/json' },
+        });
+        aiPayload = parseJsonSafe<any>(aiResp.response.text || '{}', null);
+        modelUsed = aiResp.modelUsed;
+      } catch (aiErr) {
+        console.warn('AI deep pre-review skipped, using deterministic checks:', aiErr);
+      }
+    }
+
+    const aiChecks = Array.isArray(aiPayload?.hallazgosAdicionales)
+      ? aiPayload.hallazgosAdicionales.map((h: any, idx: number) => ({
+          id: `chk-ai-${idx}-${Date.now()}`,
+          criterio: h.criterio || 'Criterio Técnico IA',
+          estado: ['CUMPLE', 'ATENCION', 'CRITICO'].includes(h.estado) ? h.estado : 'ATENCION',
+          detalle: h.detalle || '',
+          recomendacion: h.recomendacion || '',
+        }))
+      : [];
+
+    const allChecks = [...deterministicChecks, ...aiChecks];
+    const criticos = allChecks.filter((c) => c.estado === 'CRITICO').length;
+    const atenciones = allChecks.filter((c) => c.estado === 'ATENCION').length;
+
+    const computedScore = Math.max(
+      10,
+      Math.min(100, Number(aiPayload?.puntuacionPreparacion) || (100 - criticos * 25 - atenciones * 10))
+    );
+
+    const estadoAprobacion: 'APROBADO_REVISION' | 'CON_OBSERVACIONES_PREVIAS' | 'BLOQUEADO' =
+      aiPayload?.estadoAprobacion && ['APROBADO_REVISION', 'CON_OBSERVACIONES_PREVIAS', 'BLOQUEADO'].includes(aiPayload.estadoAprobacion)
+        ? aiPayload.estadoAprobacion
+        : criticos > 0
+        ? 'BLOQUEADO'
+        : atenciones > 0
+        ? 'CON_OBSERVACIONES_PREVIAS'
+        : 'APROBADO_REVISION';
+
+    const nowIso = new Date().toISOString();
+    const sha256 = crypto
+      .createHash('sha256')
+      .update(`${tipoDocumento}_${entity?.id || 'none'}_${computedScore}_${nowIso}`)
+      .digest('hex');
+
+    res.json({
+      success: true,
+      modelUsed,
+      report: {
+        tipoDocumento,
+        puntuacionPreparacion: computedScore,
+        estadoAprobacion,
+        resumenEjecutivo:
+          aiPayload?.resumenEjecutivo ||
+          `Revisión previa completada para ${tipoDocumento}. Se verificaron ${allChecks.length} controles (${criticos} críticos, ${atenciones} en atención).`,
+        hallazgosRevision: allChecks,
+        mejorasSugeridas: Array.isArray(aiPayload?.mejorasSugeridas)
+          ? aiPayload.mejorasSugeridas
+          : allChecks.filter((c) => c.estado !== 'CUMPLE').map((c) => c.recomendacion),
+        textoMejoradoSugerido: aiPayload?.textoMejoradoSugerido || '',
+        timestamp: nowIso,
+        sha256,
+        modelUsed,
+      },
+    });
+  } catch (error: any) {
+    console.error('Error in /api/forensic/pre-review-document:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Error ejecutando la revisión previa interactiva.',
+    });
   }
 });
 

@@ -8,7 +8,6 @@ import {
   FolderTree,
   History,
   Sparkles,
-  HelpCircle,
   Sliders,
   UserCheck,
   Calendar,
@@ -16,12 +15,15 @@ import {
   Save,
   Building2,
   Eye,
+  LayoutList,
+  Layers,
+  CheckCircle2,
+  Plus,
 } from 'lucide-react';
-import { EvidenceSection } from './components/EvidenceSection';
+import { EvidenceSection, StructuredExtractionPayload } from './components/EvidenceSection';
 import { AnalysisSection } from './components/AnalysisSection';
 import { ResultsSection } from './components/ResultsSection';
 import { BenfordChart } from './components/BenfordChart';
-import { StreamlitFixModal } from './components/StreamlitFixModal';
 import { HistoryModal } from './components/HistoryModal';
 import { ThresholdConfigModal, DEFAULT_THRESHOLDS } from './components/ThresholdConfigModal';
 import { RealtimeAlertBanner } from './components/RealtimeAlertBanner';
@@ -33,283 +35,231 @@ import { TraceabilityTimelineModal } from './components/TraceabilityTimelineModa
 import { EntitySwitcherBar } from './components/EntitySwitcherBar';
 import { CaseRegistryAndHistorySection } from './components/CaseRegistryAndHistorySection';
 import { CaseScreenViewerModal } from './components/CaseScreenViewerModal';
+import { PaymentCycleSection } from './components/PaymentCycleSection';
+import { AiStepCoach } from './components/AiStepCoach';
+import { DirectorResponsibilitySection } from './components/DirectorResponsibilitySection';
+import { InteractivePreReviewRunnerSection } from './components/InteractivePreReviewRunnerSection';
 import {
   AuditedEntity,
   CaseSession,
   ContractEvidenceRow,
+  DirectorResponsibility,
   EvidenceFile,
   ForensicAnalysisResult,
   ForensicThresholds,
+  InteractivePreReviewReport,
+  PreReviewDocType,
   RealtimeAlert,
   AuditorProfile,
   AuditPeriodScope,
   DossierSectionItem,
   ObservacionDecision,
   TraceabilityLog,
+  PaymentCycleRow,
 } from './types/forensic';
-import { SAMPLE_EDEESTE_SENASE_CONTRACTS } from './utils/sampleData';
-import { INITIAL_OBSERVACIONES_SAMPLE, PAISES_NORMATIVA } from './utils/countryNorms';
-import { PRESET_ENTITIES, getEntityPresetContracts } from './utils/entities';
+import { PAISES_NORMATIVA } from './utils/countryNorms';
 import { playForensicAlertSound } from './utils/audioAlert';
 import { calculateStringSHA256 } from './utils/crypto';
 
-export default function App() {
-  // Multi-Entity Management
-  const [entities, setEntities] = useState<AuditedEntity[]>(PRESET_ENTITIES);
-  const [activeEntity, setActiveEntity] = useState<AuditedEntity>(PRESET_ENTITIES[0]);
+const STEP_META: { step: number; short: string; title: string; subtitle: string }[] = [
+  {
+    step: 1,
+    short: 'Entidad y Alcance',
+    title: 'Registro de Entidad Real, Perito y Alcance del Caso',
+    subtitle:
+      'Registra o edita la entidad exclusiva a auditar, el período fiscal y la jurisdicción normativa aplicable.',
+  },
+  {
+    step: 2,
+    short: 'Evidencia Real (Archivo/Link)',
+    title: 'Carga y Extracción Literal desde Documento, Enlace o Texto',
+    subtitle:
+      'Sube archivos digitales (PDF, Excel, Word, CSV, Imagen), conecta un portal web o pega texto real para extraer datos con IA.',
+  },
+  {
+    step: 3,
+    short: 'Ciclo de Pagos y Benford',
+    title: 'Ciclo Completo de Pagos, Contratos y Análisis Estadístico Real',
+    subtitle:
+      'Edita o audita cada etapa del desembolso (Solicitud → Contrato → Recepción → e-CF → Retenciones → Pago Neto) y Ley de Benford.',
+  },
+  {
+    step: 4,
+    short: 'Directores, Dossier y Obs.',
+    title: 'Segregación por Directores (Decretos Online), Réplicas, Contra-Réplicas y Observaciones',
+    subtitle:
+      'Busca decretos oficiales en línea con IA, segrega contratos/pagos por período/director y gestiona Actas, Recursos, Réplicas y Contra-Réplicas.',
+  },
+  {
+    step: 5,
+    short: 'Ejecutor Pre-Revisión y Dictamen',
+    title: 'Ejecutor Interactivo de Revisión Previa (Acta, Preliminar, Final) y Dictamen IA',
+    subtitle:
+      'Ejecuta controles interactivos pre-emisión, emite el dictamen integral y descarga el informe técnico con trazabilidad completa.',
+  },
+];
 
-  // Active Case Identity
-  const [activeCaseId, setActiveCaseId] = useState<string>('case-001');
-  const [activeCaseCode, setActiveCaseCode] = useState<string>('CASO-2026-001');
-  const [nombreCaso, setNombreCaso] = useState('Auditoria_Edeeste_Senase');
+function createEmptyDossierItem(id: string, defaultTitle: string): DossierSectionItem {
+  return {
+    id,
+    titulo: defaultTitle,
+    contenido: '',
+    fecha: new Date().toISOString().split('T')[0],
+    sha256: '',
+    archivos: [],
+  };
+}
+
+export default function App() {
+  // Guided Workflow Navigation
+  const [activeStep, setActiveStep] = useState<number>(1);
+  const [showAllSteps, setShowAllSteps] = useState<boolean>(false);
+
+  // Entities (Zero demo presets; loaded strictly from DB or created by user)
+  const [entities, setEntities] = useState<AuditedEntity[]>([]);
+  const [activeEntity, setActiveEntity] = useState<AuditedEntity | null>(null);
+
+  // Inline quick entity registration form when no entity exists
+  const [quickNombre, setQuickNombre] = useState('');
+  const [quickSiglas, setQuickSiglas] = useState('');
+  const [quickRnc, setQuickRnc] = useState('');
+  const [quickSector, setQuickSector] = useState('Sector Público / Contrataciones');
+  const [quickPais, setQuickPais] = useState('DO');
+  const [quickPortal, setQuickPortal] = useState('');
+  const [quickDescripcion, setQuickDescripcion] = useState('');
+
+  // Active Case Identity (Clean)
+  const [activeCaseId, setActiveCaseId] = useState<string>(() => `case-${Date.now()}`);
+  const [activeCaseCode, setActiveCaseCode] = useState<string>(() => `CASO-${new Date().getFullYear()}-001`);
+  const [nombreCaso, setNombreCaso] = useState('');
   const [origenesSeleccionados, setOrigenesSeleccionados] = useState<string[]>([
-    'Licitaciones Públicas (DGCP / Compras Dominicana)',
+    'Portal de Compras y Contrataciones Públicas',
     'Contabilidad Central (SAP / ERP)',
   ]);
-  const [requerimiento, setRequerimiento] = useState(
-    'Analizar adendas contractuales superiores al 50% del monto original. Identificar contratos fraccionados, incrementos desproporcionados e incumplimiento del Art. 31 de la Ley 340-06.'
-  );
-  const [anonimizar, setAnonimizar] = useState(true);
+  const [requerimiento, setRequerimiento] = useState('');
+  const [anonimizar, setAnonimizar] = useState(false);
 
-  // 1. Datos del Usuario / Perito Auditor
+  // Auditor Profile (Clean production storage)
   const [auditor, setAuditor] = useState<AuditorProfile>(() => {
-    const saved = localStorage.getItem('forensic_auditor_profile');
+    const saved = localStorage.getItem('forensic_prod_auditor_v2');
     if (saved) {
       try {
         return JSON.parse(saved);
       } catch {}
     }
     return {
-      nombre: 'Lic. Pedro Baldera',
-      cedulaId: '001-1234567-8',
-      cargo: 'Auditor Superior Forense Big 4',
-      entidad: 'Dirección de Auditoría Forense e Inteligencia de Datos',
+      nombre: '',
+      cedulaId: '',
+      cargo: 'Auditor Forense',
+      entidad: '',
       pais: 'República Dominicana',
-      colegiatura: 'CP-10492-RD',
+      colegiatura: '',
     };
   });
 
-  // 2. País, Normativa e Idioma
+  // Country, Language & Period Scope
   const [selectedCountry, setSelectedCountry] = useState<string>('DO');
   const [selectedLanguage, setSelectedLanguage] = useState<string>('Español (DO)');
-
-  // 3. Alcance y Rango del Período
   const [periodo, setPeriodo] = useState<AuditPeriodScope>({
-    fechaDesde: '2024-01-01',
-    fechaHasta: '2024-12-31',
-    alcancePericial:
-      'Fiscalización integral de adendas contractuales superiores al 50%, fraccionamiento de pagos menores y erogaciones correspondientes al período fiscal 2024.',
+    fechaDesde: `${new Date().getFullYear()}-01-01`,
+    fechaHasta: `${new Date().getFullYear()}-12-31`,
+    alcancePericial: '',
   });
 
-  // 4. Dossier Contradictorio
-  const [actaLectura, setActaLectura] = useState<DossierSectionItem>({
-    id: 'acta-01',
-    titulo: 'Acta de Lectura Notificada de Hallazgos Preliminares',
-    contenido:
-      'En fecha 15 de agosto de 2024, se dio lectura formal al pliego de observaciones preliminares ante el comité de compras y la dirección financiera de la entidad auditada, concediendo el plazo legal de 15 días laborables para la interposición de recursos de reconsideración y aportación de pruebas documentales.',
-    fecha: '2024-08-15',
-    sha256: '4f9b2d88c1a93b45120e8d71249b671a53928190deaf41829013c7a918e47201',
-    archivos: [],
-  });
+  // Dossier Contradictorio (Clean)
+  const [actaLectura, setActaLectura] = useState<DossierSectionItem>(() =>
+    createEmptyDossierItem('acta-01', 'Acta de Lectura')
+  );
+  const [recursos, setRecursos] = useState<DossierSectionItem[]>([]);
+  const [informePreliminar, setInformePreliminar] = useState<DossierSectionItem>(() =>
+    createEmptyDossierItem('inf-prelim-01', 'Informe Preliminar de Auditoría')
+  );
+  const [replicas, setReplicas] = useState<DossierSectionItem[]>([]);
+  const [contraReplicas, setContraReplicas] = useState<DossierSectionItem[]>([]);
+  const [directors, setDirectors] = useState<DirectorResponsibility[]>([]);
+  const [preReviewReports, setPreReviewReports] = useState<Partial<Record<PreReviewDocType, InteractivePreReviewReport>>>({});
 
-  const [recursos, setRecursos] = useState<DossierSectionItem[]>([
-    {
-      id: 'rec-01',
-      numero: 1,
-      titulo: 'Recurso de Reconsideración No. 1 (Alegatos Adendas Edeeste)',
-      contenido:
-        'La entidad sostiene que la Adenda No. 1 al contrato CT-EDE-2024-041 respondió a eventos de fuerza mayor derivados del colapso de transformadores en la subestación San Pedro, aportando bitácora de incidencias técnicas.',
-      fecha: '2024-08-28',
-      sha256: '7b2a99148d21c3b4a5690e1f78921a43bc912384910248ab12e94719283e1024',
-      archivos: [],
-    },
-    {
-      id: 'rec-02',
-      numero: 2,
-      titulo: 'Recurso de Reconsideración No. 2 (Descargos Comprobantes e-CF)',
-      contenido:
-        'Se anexa copia electrónica de los comprobantes fiscales validados con Registro Nacional del Contribuyente y constancia de pago de impuestos retenidos.',
-      fecha: '2024-09-05',
-      sha256: '3189a0f4819c4d28e71b29a103847291a2839401823904812930481928374619',
-      archivos: [],
-    },
-  ]);
-
-  const [informePreliminar, setInformePreliminar] = useState<DossierSectionItem>({
-    id: 'inf-prelim-01',
-    titulo: 'Informe Preliminar de Auditoría Forense No. INF-2024-088',
-    contenido:
-      'El equipo auditor constató indicios de sobrecostos presupuestarios, posibles adendas en violación al límite del 50% de la Ley 340-06 y debilidades graves en la supervisión de obras eléctricas.',
-    fecha: '2024-08-10',
-    sha256: 'a918b27346192837401928374610293847192038471029384710293847102938',
-    archivos: [],
-  });
-
-  const [replicas, setReplicas] = useState<DossierSectionItem[]>([
-    {
-      id: 'rep-01',
-      numero: 1,
-      titulo: 'Réplica No. 1 a las Excepciones de Emergencia',
-      contenido:
-        'La firma auditora ratifica que para acogerse a la causal de emergencia del Art. 31, era mandatorio contar con declaratoria formal previa emitida por el Poder Ejecutivo y no meras certificaciones internas de la dirección técnica.',
-      fecha: '2024-09-12',
-      sha256: '9182736450192837461029384710293847102938471029384710293847102938',
-      archivos: [],
-    },
-  ]);
-
-  // 5. Resoluciones Contradictorias de Observaciones
-  const [observaciones, setObservaciones] = useState<ObservacionDecision[]>(() => {
-    const saved = localStorage.getItem('forensic_observaciones_decididas');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch {}
-    }
-    return INITIAL_OBSERVACIONES_SAMPLE;
-  });
-
-  // 6. Trazabilidad Histórica y Cadena de Custodia
-  const [traceabilityLogs, setTraceabilityLogs] = useState<TraceabilityLog[]>([
-    {
-      id: 'log-01',
-      timestamp: '2026-10-02 08:30:15',
-      accion: 'Apertura de Expediente Criptográfico',
-      usuario: 'Lic. Pedro Baldera',
-      detalle: 'Inicialización de caso Auditoria_Edeeste_Senase y estructura de 7 carpetas conforme a ISO/IEC 27037.',
-      sha256: '8b7a48d3e21543f06ac2914db9c581a42b918f6d713c7a0d421890e1fe6b8912',
-      etapa: 'ENTRADA',
-    },
-    {
-      id: 'log-02',
-      timestamp: '2026-10-02 09:12:40',
-      accion: 'Carga de Evidencia Contractual',
-      usuario: 'Lic. Pedro Baldera',
-      detalle: 'Carga de 7 contratos y adendas de Edeeste / Senase con sello SHA-256 verificado.',
-      sha256: '9b7a48d3e21543f06ac2914db9c581a42b918f6d713c7a0d421890e1fe6b8912',
-      etapa: 'ENTRADA',
-    },
-  ]);
-
-  const [evidenceFile, setEvidenceFile] = useState<EvidenceFile | null>({
-    name: 'Matriz_Contratos_Adendas_Edeeste_Senase_2024.csv',
-    size: 48920,
-    type: 'text/csv',
-    parsedFormat: 'CSV',
-    sha256: '9b7a48d3e21543f06ac2914db9c581a42b918f6d713c7a0d421890e1fe6b8912',
-    uploadDate: new Date().toISOString(),
-    contentSnippet: 'Muestra contractual de Edeeste / Senase con adendas > 50% verificadas por auditoría pericial.',
-    extractedText: SAMPLE_EDEESTE_SENASE_CONTRACTS.map(
-      (c) => `${c.contratoId} | ${c.proveedor} | Orig: ${c.montoOriginal} | Adenda: ${c.montoAdenda} (+${c.adendaPct}%)`
-    ).join('\n'),
-    recordCount: SAMPLE_EDEESTE_SENASE_CONTRACTS.length,
-  });
-  const [contractRows, setContractRows] = useState<ContractEvidenceRow[]>(SAMPLE_EDEESTE_SENASE_CONTRACTS);
-
+  // Real Observations, Evidence, Contracts, Payment Cycle, Traceability & Final Result (Clean)
+  const [observaciones, setObservaciones] = useState<ObservacionDecision[]>([]);
+  const [traceabilityLogs, setTraceabilityLogs] = useState<TraceabilityLog[]>([]);
+  const [evidenceFile, setEvidenceFile] = useState<EvidenceFile | null>(null);
+  const [contractRows, setContractRows] = useState<ContractEvidenceRow[]>([]);
+  const [paymentCycleRows, setPaymentCycleRows] = useState<PaymentCycleRow[]>([]);
   const [currentResult, setCurrentResult] = useState<ForensicAnalysisResult | null>(null);
 
-  // Fraud Detection Thresholds State
+  // Fraud Thresholds & Modals
   const [thresholds, setThresholds] = useState<ForensicThresholds>(DEFAULT_THRESHOLDS);
   const [showThresholdModal, setShowThresholdModal] = useState(false);
   const [showUserProfileModal, setShowUserProfileModal] = useState(false);
   const [showTraceabilityModal, setShowTraceabilityModal] = useState(false);
   const [realtimeAlerts, setRealtimeAlerts] = useState<RealtimeAlert[]>([]);
-
-  // Modals & Registry State
-  const [showStreamlitFix, setShowStreamlitFix] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [viewingCaseOnScreen, setViewingCaseOnScreen] = useState<CaseSession | null>(null);
   const [isSavingCase, setIsSavingCase] = useState(false);
   const [lastSavedMessage, setLastSavedMessage] = useState<string | null>(null);
 
-  const [historyList, setHistoryList] = useState<CaseSession[]>([
-    {
-      id: 'case-001',
-      codigoCaso: 'CASO-2026-001',
-      nombreCaso: 'Auditoria_Edeeste_Senase',
-      estado: 'EN_PROCESO',
-      timestamp: new Date().toISOString(),
-      raizCaso: 'caso_auditoria_edeeste_senase_20261002',
-      origenes: ['Licitaciones Públicas', 'Contabilidad Central'],
-      requerimiento: 'Adendas contractuales que superan el 50% del valor inicial contratado.',
-      selloDigital: '9b7a48d3e21543f06ac2914db9c581a42b918f6d713c7a0d421890e1fe6b8912',
-      entity: PRESET_ENTITIES[0],
-      contractRows: SAMPLE_EDEESTE_SENASE_CONTRACTS,
-      observaciones: INITIAL_OBSERVACIONES_SAMPLE,
-    },
-  ]);
+  // Cases exclusively scoped to the activeEntity
+  const [entityCases, setEntityCases] = useState<CaseSession[]>([]);
 
-  // Load persisted entities and cases from backend DB on startup
+  // Load persisted entities on startup (ZERO seed demo data)
   useEffect(() => {
-    const loadPersistedData = async () => {
+    const loadPersisted = async () => {
       try {
-        const [entRes, casesRes] = await Promise.all([fetch('/api/entities'), fetch('/api/cases')]);
+        const entRes = await fetch('/api/entities');
         if (entRes.ok) {
           const entData = await entRes.json();
           if (entData.success && Array.isArray(entData.entities) && entData.entities.length > 0) {
-            const customIds = new Set(PRESET_ENTITIES.map((e) => e.id));
-            const extras = entData.entities.filter((e: AuditedEntity) => !customIds.has(e.id));
-            setEntities([...PRESET_ENTITIES, ...extras]);
-          }
-        }
-        if (casesRes.ok) {
-          const caseData = await casesRes.json();
-          if (caseData.success && Array.isArray(caseData.cases) && caseData.cases.length > 0) {
-            setHistoryList(caseData.cases);
-          } else {
-            // Seed initial case in backend DB if empty
-            const seedCase: CaseSession = {
-              id: 'case-001',
-              codigoCaso: 'CASO-2026-001',
-              nombreCaso: 'Auditoria_Edeeste_Senase',
-              estado: 'EN_PROCESO',
-              timestamp: new Date().toISOString(),
-              raizCaso: 'caso_auditoria_edeeste_senase_20261002',
-              origenes: ['Licitaciones Públicas (DGCP / Compras Dominicana)', 'Contabilidad Central (SAP / ERP)'],
-              requerimiento:
-                'Analizar adendas contractuales superiores al 50% del monto original. Identificar contratos fraccionados, incrementos desproporcionados e incumplimiento del Art. 31 de la Ley 340-06.',
-              selloDigital: '9b7a48d3e21543f06ac2914db9c581a42b918f6d713c7a0d421890e1fe6b8912',
-              entity: PRESET_ENTITIES[0],
-              auditor,
-              periodo,
-              paisNormativa: 'DO',
-              idioma: 'Español (DO)',
-              contractRows: SAMPLE_EDEESTE_SENASE_CONTRACTS,
-              observaciones: INITIAL_OBSERVACIONES_SAMPLE,
-              actaLectura,
-              recursos,
-              informePreliminar,
-              replicas,
-              traceabilityLogs,
-            };
-            await fetch('/api/cases', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(seedCase),
-            });
+            setEntities(entData.entities);
+            const firstEnt: AuditedEntity = entData.entities[0];
+            setActiveEntity(firstEnt);
+            setSelectedCountry(firstEnt.paisCodigo || 'DO');
+            setNombreCaso(`Auditoria_${firstEnt.siglas}_${new Date().getFullYear()}`);
+            await fetchCasesForEntity(firstEnt.id);
           }
         }
       } catch (err) {
-        console.warn('No se pudo sincronizar historial inicial con el servidor:', err);
+        console.warn('Error cargando entidades persistidas:', err);
       }
     };
-    loadPersistedData();
+    loadPersisted();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Log Traceability Action Helper
+  const fetchCasesForEntity = async (entityId: string) => {
+    try {
+      const resp = await fetch(`/api/cases?entityId=${encodeURIComponent(entityId)}`);
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.success && Array.isArray(data.cases)) {
+          setEntityCases(data.cases);
+          return data.cases as CaseSession[];
+        }
+      }
+    } catch {}
+    setEntityCases([]);
+    return [];
+  };
+
+  // Persist auditor profile locally
+  useEffect(() => {
+    try {
+      localStorage.setItem('forensic_prod_auditor_v2', JSON.stringify(auditor));
+    } catch {}
+  }, [auditor]);
+
   const logTraceabilityAction = async (
     accion: string,
     detalle: string,
     etapa: 'ENTRADA' | 'EVALUACION' | 'DICTAMEN' | 'SALIDA' = 'EVALUACION'
   ) => {
     const ts = new Date().toISOString().replace('T', ' ').substring(0, 19);
-    const hash = await calculateStringSHA256(`${accion}_${detalle}_${ts}_${auditor.nombre}`);
+    const actor = auditor.nombre || 'Auditor Activo';
+    const hash = await calculateStringSHA256(`${accion}_${detalle}_${ts}_${actor}`);
     const newLog: TraceabilityLog = {
-      id: `log-${Date.now()}`,
+      id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       timestamp: ts,
       accion,
-      usuario: `${auditor.nombre} (${auditor.cargo})`,
+      usuario: `${actor}${auditor.cargo ? ` (${auditor.cargo})` : ''}`,
       detalle,
       sha256: hash,
       etapa,
@@ -317,15 +267,7 @@ export default function App() {
     setTraceabilityLogs((prev) => [newLog, ...prev]);
   };
 
-  // Autoguardado local
-  useEffect(() => {
-    try {
-      localStorage.setItem('forensic_auditor_profile', JSON.stringify(auditor));
-      localStorage.setItem('forensic_observaciones_decididas', JSON.stringify(observaciones));
-    } catch {}
-  }, [auditor, observaciones]);
-
-  // Real-time Threshold Monitoring Engine
+  // Real-time monitoring strictly on real contracts and real payment cycle rows
   useEffect(() => {
     if (!thresholds.notificacionesActivas) {
       setRealtimeAlerts([]);
@@ -342,28 +284,29 @@ export default function App() {
           tipo: 'ADENDA_EXCESIVA',
           severidad: row.adendaPct > thresholds.adendaMaxPct * 1.3 ? 'CRÍTICA' : 'ALTA',
           titulo: `Adenda Excesiva en ${row.contratoId}`,
-          descripcion: `${row.proveedor}: Aumento contractual del ${row.adendaPct.toFixed(1)}% viola el umbral configurado de ${thresholds.adendaMaxPct}%.`,
+          descripcion: `${row.proveedor || 'Proveedor'}: Aumento contractual del ${row.adendaPct.toFixed(1)}% supera el umbral (${thresholds.adendaMaxPct}%).`,
           valorDetectado: `+${row.adendaPct.toFixed(1)}%`,
           umbralLimite: `Máx. ${thresholds.adendaMaxPct}%`,
-          referencia: 'Ley 340-06 / Art. 31',
+          referencia: 'Control Contractual',
         });
       }
     });
 
-    const benfordDigit8Deviation = 15.9;
-    if (benfordDigit8Deviation > thresholds.benfordMaxDeviationPct) {
-      alerts.push({
-        id: `alert-benford-8-${thresholds.benfordMaxDeviationPct}`,
-        timestamp: new Date().toLocaleTimeString('es-DO', { hour: '2-digit', minute: '2-digit' }),
-        tipo: 'BENFORD_ANOMALIA',
-        severidad: 'ALTA',
-        titulo: 'Anomalía Benford en Primer Dígito (8)',
-        descripcion: `Frecuencia observada del 21.0% difiere de la curva teórica (5.1%) por +${benfordDigit8Deviation.toFixed(1)}%, sobrepasando la tolerancia ±${thresholds.benfordMaxDeviationPct}%.`,
-        valorDetectado: `Δ +${benfordDigit8Deviation.toFixed(1)}%`,
-        umbralLimite: `Tolerancia ±${thresholds.benfordMaxDeviationPct}%`,
-        referencia: 'NIA 240 / Prueba de Dígitos',
-      });
-    }
+    paymentCycleRows.forEach((p) => {
+      if (p.estadoCiclo === 'SIN_RECEPCION' || p.estadoCiclo === 'SIN_COMPROBANTE' || p.estadoCiclo === 'EXCEDE_CONTRATO' || p.estadoCiclo === 'DUPLICADO') {
+        alerts.push({
+          id: `alert-pay-${p.id}-${p.estadoCiclo}`,
+          timestamp: new Date().toLocaleTimeString('es-DO', { hour: '2-digit', minute: '2-digit' }),
+          tipo: 'CICLO_PAGO',
+          severidad: p.estadoCiclo === 'DUPLICADO' || p.estadoCiclo === 'EXCEDE_CONTRATO' ? 'CRÍTICA' : 'ALTA',
+          titulo: `Incidencia Ciclo de Pago (${p.ordenNumero})`,
+          descripcion: `${p.beneficiario || 'Beneficiario'}: Estado ${p.estadoCiclo}. ${p.observacionPago || ''}`,
+          valorDetectado: p.estadoCiclo,
+          umbralLimite: 'Ciclo Completo',
+          referencia: 'Ciclo de Pagos',
+        });
+      }
+    });
 
     setRealtimeAlerts(alerts);
 
@@ -372,72 +315,161 @@ export default function App() {
     }
   }, [
     contractRows,
+    paymentCycleRows,
     thresholds.adendaMaxPct,
-    thresholds.benfordMaxDeviationPct,
     thresholds.notificacionesActivas,
     thresholds.alertaSonora,
   ]);
 
-  const handleDismissAlert = (id: string) => {
-    setRealtimeAlerts((prev) => prev.filter((a) => a.id !== id));
+  const resetWorkspaceForEntity = (entity: AuditedEntity, casesCount: number) => {
+    const newId = `case-${Date.now()}`;
+    const newCode = `CASO-${new Date().getFullYear()}-${String(casesCount + 1).padStart(3, '0')}`;
+    setActiveCaseId(newId);
+    setActiveCaseCode(newCode);
+    setNombreCaso(`Auditoria_${entity.siglas}_${new Date().getFullYear()}`);
+    setRequerimiento(
+      `Auditoría forense integral de ${entity.nombre} (${entity.siglas}) sobre evidencias, contrataciones y ciclo de pagos reales del período.`
+    );
+    setEvidenceFile(null);
+    setContractRows([]);
+    setPaymentCycleRows([]);
+    setObservaciones([]);
+    setCurrentResult(null);
+    setActaLectura(createEmptyDossierItem('acta-01', `Acta de Lectura — ${entity.siglas}`));
+    setRecursos([]);
+    setInformePreliminar(createEmptyDossierItem('inf-prelim-01', `Informe Preliminar — ${entity.siglas}`));
+    setReplicas([]);
+    setContraReplicas([]);
+    setDirectors([]);
+    setPreReviewReports({});
   };
 
-  const handleClearAllAlerts = () => {
-    setRealtimeAlerts([]);
-  };
-
-  // Switch active entity & prepare clean workspace for that entity
-  const handleSwitchEntity = (entity: AuditedEntity) => {
+  const handleSwitchEntity = async (entity: AuditedEntity) => {
     setActiveEntity(entity);
     const matchingCountry = PAISES_NORMATIVA.find((p) => p.codigo === entity.paisCodigo);
     if (matchingCountry) {
       setSelectedCountry(matchingCountry.codigo);
     }
-    const newId = `case-${Date.now()}`;
-    const newCode = `CASO-${new Date().getFullYear()}-${String(historyList.length + 1).padStart(3, '0')}`;
-    setActiveCaseId(newId);
-    setActiveCaseCode(newCode);
-    setNombreCaso(`Auditoria_${entity.siglas}_${new Date().getFullYear()}`);
-    setRequerimiento(
-      `Auditoría forense integral sobre ${entity.nombre} (${entity.siglas}). Evaluar adendas superiores al ${thresholds.adendaMaxPct}%, desviaciones de Ley de Benford y cumplimiento normativo.`
-    );
-    const presetRows = getEntityPresetContracts(entity);
-    setContractRows(presetRows);
-    setEvidenceFile(null);
-    setCurrentResult(null);
-    setLastSavedMessage(`Análisis cambiado a la entidad ${entity.siglas} (${entity.nombre}).`);
+    const loadedCases = await fetchCasesForEntity(entity.id);
+    if (loadedCases.length > 0) {
+      handleSelectCaseFromHistory(loadedCases[0]);
+      setLastSavedMessage(
+        `Entidad cambiada a ${entity.siglas}. Mostrando sus ${loadedCases.length} caso(s) exclusivos.`
+      );
+    } else {
+      resetWorkspaceForEntity(entity, 0);
+      setLastSavedMessage(`Entidad activa: ${entity.siglas} (${entity.nombre}). Lista para cargar datos reales.`);
+    }
     logTraceabilityAction(
-      'Cambio de Entidad Auditada',
-      `Se transfirió el espacio de análisis a ${entity.nombre} (RNC/NIF: ${entity.rncNif})`,
+      'Selección de Entidad Exclusiva',
+      `Espacio de trabajo aislado en ${entity.nombre} (RNC/NIF: ${entity.rncNif})`,
       'ENTRADA'
     );
   };
 
-  const handleCreateEntity = async (newEnt: AuditedEntity) => {
+  const handleSaveEntity = async (savedEnt: AuditedEntity, isNew: boolean) => {
     try {
-      await fetch('/api/entities', {
+      const resp = await fetch('/api/entities', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newEnt),
+        body: JSON.stringify(savedEnt),
       });
+      const data = await resp.json();
+      const persisted = data.success && data.entity ? (data.entity as AuditedEntity) : savedEnt;
+
+      setEntities((prev) => {
+        const exists = prev.some((e) => e.id === persisted.id);
+        return exists ? prev.map((e) => (e.id === persisted.id ? persisted : e)) : [persisted, ...prev];
+      });
+      setActiveEntity(persisted);
+      const matchingCountry = PAISES_NORMATIVA.find((p) => p.codigo === persisted.paisCodigo);
+      if (matchingCountry) setSelectedCountry(matchingCountry.codigo);
+
+      if (isNew) {
+        setEntityCases([]);
+        resetWorkspaceForEntity(persisted, 0);
+        setLastSavedMessage(`Entidad real ${persisted.siglas} registrada. Avanza al Paso 2 para cargar documentos o enlaces.`);
+      } else {
+        setLastSavedMessage(`Datos de la entidad ${persisted.siglas} actualizados.`);
+      }
+
+      logTraceabilityAction(
+        isNew ? 'Registro de Entidad Real' : 'Edición de Entidad',
+        `${persisted.nombre} (${persisted.siglas}, RNC/NIF: ${persisted.rncNif})`,
+        'ENTRADA'
+      );
+    } catch (err) {
+      console.error('Error guardando entidad:', err);
+    }
+  };
+
+  const handleDeleteEntity = async (entityId: string) => {
+    try {
+      await fetch(`/api/entities/${encodeURIComponent(entityId)}`, { method: 'DELETE' });
     } catch {}
-    setEntities((prev) => [...prev, newEnt]);
-    handleSwitchEntity(newEnt);
+    const remaining = entities.filter((e) => e.id !== entityId);
+    setEntities(remaining);
+    if (remaining.length > 0) {
+      await handleSwitchEntity(remaining[0]);
+    } else {
+      setActiveEntity(null);
+      setEntityCases([]);
+      setEvidenceFile(null);
+      setContractRows([]);
+      setPaymentCycleRows([]);
+      setObservaciones([]);
+      setReplicas([]);
+      setContraReplicas([]);
+      setDirectors([]);
+      setPreReviewReports({});
+      setCurrentResult(null);
+      setNombreCaso('');
+      setRequerimiento('');
+      setLastSavedMessage('Entidad eliminada. Registra una nueva entidad real para iniciar.');
+    }
+  };
+
+  const handleQuickCreateEntity = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!quickNombre.trim()) return;
+    const cleanSiglas =
+      quickSiglas.trim().toUpperCase() ||
+      quickNombre
+        .trim()
+        .split(/\s+/)
+        .map((w) => w[0])
+        .join('')
+        .toUpperCase()
+        .slice(0, 8);
+
+    const newEnt: AuditedEntity = {
+      id: `ent-${Date.now()}`,
+      nombre: quickNombre.trim(),
+      siglas: cleanSiglas,
+      rncNif: quickRnc.trim() || 'N/D',
+      sector: quickSector,
+      paisCodigo: quickPais,
+      moneda: quickPais === 'US' ? 'USD' : quickPais === 'ES' ? 'EUR' : quickPais === 'MX' ? 'MXN' : quickPais === 'CO' ? 'COP' : 'DOP',
+      simboloMoneda: quickPais === 'US' ? 'US$' : quickPais === 'ES' ? '€' : quickPais === 'MX' ? 'MX$' : quickPais === 'CO' ? 'COP$' : 'RD$',
+      urlPortal: quickPortal.trim(),
+      descripcion: quickDescripcion.trim(),
+      creadaEn: new Date().toISOString(),
+    };
+    await handleSaveEntity(newEnt, true);
+    setQuickNombre('');
+    setQuickSiglas('');
+    setQuickRnc('');
+    setQuickPortal('');
+    setQuickDescripcion('');
   };
 
   const handleNewCase = () => {
-    const newId = `case-${Date.now()}`;
-    const newCode = `CASO-${new Date().getFullYear()}-${String(historyList.length + 1).padStart(3, '0')}`;
-    setActiveCaseId(newId);
-    setActiveCaseCode(newCode);
-    setNombreCaso(`Expediente_${activeEntity.siglas}_${Date.now().toString().slice(-4)}`);
-    setCurrentResult(null);
-    setEvidenceFile(null);
-    setContractRows([]);
-    setLastSavedMessage(`Nuevo caso limpio ${newCode} iniciado para ${activeEntity.siglas}. Carga un PDF, Excel, Word o TXT.`);
+    if (!activeEntity) return;
+    resetWorkspaceForEntity(activeEntity, entityCases.length);
+    setLastSavedMessage(`Nuevo caso limpio iniciado para ${activeEntity.siglas}.`);
     logTraceabilityAction(
-      'Apertura de Nuevo Caso',
-      `Se creó el expediente ${newCode} para la entidad ${activeEntity.nombre}`,
+      'Nuevo Caso Exclusivo',
+      `Apertura de expediente limpio para ${activeEntity.nombre}`,
       'ENTRADA'
     );
   };
@@ -451,64 +483,74 @@ export default function App() {
     if (res.ok) {
       const data = await res.json();
       if (data.success && data.caseRecord) {
-        setHistoryList((prev) => {
-          const exists = prev.some((c) => c.id === data.caseRecord.id);
-          if (exists) {
-            return prev.map((c) => (c.id === data.caseRecord.id ? data.caseRecord : c));
-          }
-          return [data.caseRecord, ...prev];
+        const rec = data.caseRecord as CaseSession;
+        setEntityCases((prev) => {
+          const exists = prev.some((c) => c.id === rec.id);
+          return exists ? prev.map((c) => (c.id === rec.id ? rec : c)) : [rec, ...prev];
         });
-        return data.caseRecord as CaseSession;
+        return rec;
       }
     }
     return casePayload;
   };
 
+  const buildActiveCaseSnapshot = async (): Promise<CaseSession> => {
+    const effectiveName = nombreCaso.trim() || `Caso_${activeEntity?.siglas || 'General'}`;
+    const seal =
+      currentResult?.digitalHash ||
+      evidenceFile?.sha256 ||
+      (await calculateStringSHA256(`${activeCaseId}_${effectiveName}_${activeEntity?.id || 'none'}_${Date.now()}`));
+
+    return {
+      id: activeCaseId,
+      codigoCaso: activeCaseCode,
+      nombreCaso: effectiveName,
+      estado: currentResult ? 'DICTAMEN_EMITIDO' : 'EN_PROCESO',
+      timestamp: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      raizCaso: `caso_${effectiveName.toLowerCase().replace(/\s+/g, '_')}`,
+      origenes: origenesSeleccionados,
+      requerimiento,
+      selloDigital: seal,
+      entity: activeEntity || undefined,
+      auditor,
+      periodo,
+      paisNormativa: selectedCountry,
+      idioma: selectedLanguage,
+      evidenceFile,
+      contractRows,
+      paymentCycleRows,
+      observaciones,
+      actaLectura,
+      recursos,
+      informePreliminar,
+      replicas,
+      contraReplicas,
+      directors,
+      preReviewReports,
+      traceabilityLogs,
+      resultado: currentResult,
+    };
+  };
+
   const handleRegisterCurrentCase = async () => {
+    if (!activeEntity) {
+      setLastSavedMessage('Primero registra una entidad auditada en el Paso 1.');
+      return;
+    }
     setIsSavingCase(true);
     try {
-      const seal =
-        currentResult?.digitalHash ||
-        evidenceFile?.sha256 ||
-        (await calculateStringSHA256(`${activeCaseId}_${nombreCaso}_${activeEntity.id}_${Date.now()}`));
-
-      const casePayload: CaseSession = {
-        id: activeCaseId,
-        codigoCaso: activeCaseCode,
-        nombreCaso,
-        estado: currentResult ? 'DICTAMEN_EMITIDO' : 'EN_PROCESO',
-        timestamp: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        raizCaso: `caso_${nombreCaso.toLowerCase().replace(/\s+/g, '_')}`,
-        origenes: origenesSeleccionados,
-        requerimiento,
-        selloDigital: seal,
-        entity: activeEntity,
-        auditor,
-        periodo,
-        paisNormativa: selectedCountry,
-        idioma: selectedLanguage,
-        evidenceFile,
-        contractRows,
-        observaciones,
-        actaLectura,
-        recursos,
-        informePreliminar,
-        replicas,
-        traceabilityLogs,
-        resultado: currentResult,
-      };
-
-      const saved = await persistCaseToServer(casePayload);
-      setLastSavedMessage(`Caso ${saved.codigoCaso || activeCaseCode} (${saved.nombreCaso}) registrado y guardado en el historial.`);
+      const payload = await buildActiveCaseSnapshot();
+      const saved = await persistCaseToServer(payload);
+      setLastSavedMessage(`Caso ${saved.codigoCaso} guardado exclusivamente bajo ${activeEntity.siglas}.`);
       logTraceabilityAction(
-        'Registro de Caso en Historial',
-        `Se guardó el expediente ${saved.codigoCaso} de ${activeEntity.siglas} en base de datos persistente.`,
+        'Guardado de Caso',
+        `Expediente ${saved.codigoCaso} guardado para ${activeEntity.siglas}`,
         'SALIDA'
       );
     } catch (err) {
       console.error('Error registrando caso:', err);
-      setLastSavedMessage('No se pudo conectar con el servidor; guardado en sesión activa.');
+      setLastSavedMessage('No se pudo conectar con el servidor para guardar el caso.');
     } finally {
       setIsSavingCase(false);
     }
@@ -518,8 +560,33 @@ export default function App() {
     try {
       await fetch(`/api/cases/${encodeURIComponent(id)}`, { method: 'DELETE' });
     } catch {}
-    setHistoryList((prev) => prev.filter((c) => c.id !== id));
-    logTraceabilityAction('Eliminación de Historial', `Se eliminó el registro ${id} del historial.`, 'SALIDA');
+    setEntityCases((prev) => prev.filter((c) => c.id !== id));
+    logTraceabilityAction('Eliminación de Caso', `Se eliminó el registro ${id}.`, 'SALIDA');
+  };
+
+  const handleStructuredExtracted = async (payload: StructuredExtractionPayload) => {
+    if (payload.cicloPagosDetectado?.length > 0) {
+      setPaymentCycleRows((prev) => [...prev, ...payload.cicloPagosDetectado]);
+    }
+    if (payload.observacionesDetectadas?.length > 0) {
+      setObservaciones((prev) => [...prev, ...payload.observacionesDetectadas]);
+    }
+    if (payload.entidadDetectada && activeEntity) {
+      const updatedEnt: AuditedEntity = {
+        ...activeEntity,
+        rncNif:
+          (!activeEntity.rncNif || activeEntity.rncNif === 'N/D') && payload.entidadDetectada.rncNif
+            ? payload.entidadDetectada.rncNif
+            : activeEntity.rncNif,
+        descripcion:
+          !activeEntity.descripcion && payload.entidadDetectada.alcanceResumen
+            ? payload.entidadDetectada.alcanceResumen
+            : activeEntity.descripcion,
+      };
+      if (updatedEnt.rncNif !== activeEntity.rncNif || updatedEnt.descripcion !== activeEntity.descripcion) {
+        await handleSaveEntity(updatedEnt, false);
+      }
+    }
   };
 
   const handleAnalysisComplete = async (result: ForensicAnalysisResult) => {
@@ -529,37 +596,17 @@ export default function App() {
     };
     setCurrentResult(enriched);
 
-    const newCase: CaseSession = {
-      id: activeCaseId,
-      codigoCaso: activeCaseCode,
-      nombreCaso,
-      estado: 'DICTAMEN_EMITIDO',
-      timestamp: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      raizCaso: `caso_${nombreCaso.toLowerCase().replace(/\s+/g, '_')}_${Date.now()}`,
-      origenes: origenesSeleccionados,
-      requerimiento,
-      selloDigital: result.digitalHash,
-      entity: activeEntity,
-      auditor,
-      periodo,
-      paisNormativa: selectedCountry,
-      idioma: selectedLanguage,
-      evidenceFile,
-      contractRows,
-      observaciones,
-      actaLectura,
-      recursos,
-      informePreliminar,
-      replicas,
-      traceabilityLogs,
-      resultado: enriched,
-    };
-    await persistCaseToServer(newCase);
-    setLastSavedMessage(`Dictamen IA emitido y autoguardado en el expediente ${activeCaseCode}.`);
+    if (activeEntity) {
+      const snapshot = await buildActiveCaseSnapshot();
+      snapshot.estado = 'DICTAMEN_EMITIDO';
+      snapshot.selloDigital = result.digitalHash;
+      snapshot.resultado = enriched;
+      await persistCaseToServer(snapshot);
+      setLastSavedMessage(`Dictamen emitido y autoguardado para ${activeEntity.siglas} (${activeCaseCode}).`);
+    }
     logTraceabilityAction(
-      'Emisión de Dictamen',
-      `Análisis forense completado para ${activeEntity.siglas} con sello: ${result.digitalHash.substring(0, 12)}...`,
+      'Emisión de Dictamen IA',
+      `Dictamen emitido para ${activeEntity?.siglas || 'Entidad'} (SHA-256: ${result.digitalHash.substring(0, 12)}...)`,
       'DICTAMEN'
     );
   };
@@ -570,85 +617,78 @@ export default function App() {
     setNombreCaso(c.nombreCaso);
     setOrigenesSeleccionados(c.origenes || []);
     setRequerimiento(c.requerimiento);
-    if (c.entity) {
-      setActiveEntity(c.entity);
-      setEntities((prev) => (prev.some((e) => e.id === c.entity!.id) ? prev : [...prev, c.entity!]));
-    }
     if (c.auditor) setAuditor(c.auditor);
     if (c.periodo) setPeriodo(c.periodo);
     if (c.paisNormativa) setSelectedCountry(c.paisNormativa);
     if (c.idioma) setSelectedLanguage(c.idioma);
-    if (c.evidenceFile !== undefined) setEvidenceFile(c.evidenceFile);
-    if (c.contractRows) setContractRows(c.contractRows);
-    if (c.observaciones) setObservaciones(c.observaciones);
-    if (c.actaLectura) setActaLectura(c.actaLectura);
-    if (c.recursos) setRecursos(c.recursos);
-    if (c.informePreliminar) setInformePreliminar(c.informePreliminar);
-    if (c.replicas) setReplicas(c.replicas);
-    if (c.traceabilityLogs) setTraceabilityLogs(c.traceabilityLogs);
+    setEvidenceFile(c.evidenceFile ?? null);
+    setContractRows(c.contractRows || []);
+    setPaymentCycleRows(c.paymentCycleRows || []);
+    setObservaciones(c.observaciones || []);
+    setActaLectura(c.actaLectura || createEmptyDossierItem('acta-01', 'Acta de Lectura'));
+    setRecursos(c.recursos || []);
+    setInformePreliminar(c.informePreliminar || createEmptyDossierItem('inf-prelim-01', 'Informe Preliminar'));
+    setReplicas(c.replicas || []);
+    setContraReplicas(c.contraReplicas || []);
+    setDirectors(c.directors || []);
+    setPreReviewReports(c.preReviewReports || {});
+    setTraceabilityLogs(c.traceabilityLogs || []);
     setCurrentResult(c.resultado || null);
-    setLastSavedMessage(`Caso ${c.codigoCaso || c.nombreCaso} cargado en pantalla para edición.`);
+    setLastSavedMessage(`Expediente ${c.codigoCaso || c.nombreCaso} cargado en pantalla para edición.`);
   };
 
   const currentCountryConfig = PAISES_NORMATIVA.find((p) => p.codigo === selectedCountry) || PAISES_NORMATIVA[0];
+  const currentStepMeta = STEP_META.find((s) => s.step === activeStep) || STEP_META[0];
+  const activeCurrencySymbol = activeEntity?.simboloMoneda || 'RD$';
 
-  const activeCaseSnapshot: CaseSession = {
-    id: activeCaseId,
-    codigoCaso: activeCaseCode,
-    nombreCaso,
-    estado: currentResult ? 'DICTAMEN_EMITIDO' : 'EN_PROCESO',
-    timestamp: new Date().toISOString(),
-    raizCaso: `caso_${nombreCaso.toLowerCase().replace(/\s+/g, '_')}`,
-    origenes: origenesSeleccionados,
-    requerimiento,
-    selloDigital: currentResult?.digitalHash || evidenceFile?.sha256 || 'EN_CUSTODIA',
-    entity: activeEntity,
-    auditor,
-    periodo,
-    paisNormativa: selectedCountry,
-    idioma: selectedLanguage,
-    evidenceFile,
-    contractRows,
-    observaciones,
-    actaLectura,
-    recursos,
-    informePreliminar,
-    replicas,
-    traceabilityLogs,
-    resultado: currentResult,
+  const openCurrentCaseOnScreen = async () => {
+    const snap = await buildActiveCaseSnapshot();
+    setViewingCaseOnScreen(snap);
   };
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-sky-500 selection:text-white">
-      {/* Top Bar */}
-      <div className="bg-gradient-to-r from-amber-950/80 via-slate-900 to-amber-950/80 border-b border-amber-800/40 px-4 py-2.5 text-xs text-amber-200 flex flex-wrap items-center justify-between gap-2 shadow-inner">
+      {/* Top Status Strip */}
+      <div className="bg-slate-900 border-b border-slate-800 px-4 py-2.5 text-xs flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="bg-amber-500 text-slate-950 font-bold px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wider">
+          <span className="bg-sky-500 text-slate-950 font-bold px-2 py-0.5 rounded text-[10px] uppercase tracking-wider">
             {activeCaseCode}
           </span>
           <span className="font-medium text-slate-200">
-            Entidad: <strong>{activeEntity.siglas}</strong> | Perito: <strong>{auditor.nombre}</strong> | Jurisdicción:{' '}
-            <strong>{currentCountryConfig.bandera} {currentCountryConfig.nombre}</strong>
+            Entidad: <strong>{activeEntity ? `${activeEntity.siglas} (${activeEntity.nombre})` : 'Sin registrar'}</strong> |{' '}
+            Jurisdicción: <strong>{currentCountryConfig.bandera} {currentCountryConfig.nombre}</strong>
           </span>
         </div>
 
         <div className="flex items-center gap-3 flex-wrap">
           <button
-            onClick={() => setViewingCaseOnScreen(activeCaseSnapshot)}
+            onClick={() => setShowAllSteps(!showAllSteps)}
+            className={`text-xs px-2.5 py-1 rounded border flex items-center gap-1.5 font-medium cursor-pointer ${
+              showAllSteps
+                ? 'bg-sky-600/20 text-sky-300 border-sky-500/40'
+                : 'bg-slate-800 text-slate-300 border-slate-700 hover:text-white'
+            }`}
+          >
+            {showAllSteps ? <Layers className="w-3.5 h-3.5" /> : <LayoutList className="w-3.5 h-3.5" />}
+            {showAllSteps ? 'Modo Guiado Paso a Paso' : 'Ver Todos los Pasos'}
+          </button>
+
+          <button
+            onClick={openCurrentCaseOnScreen}
             className="text-xs text-emerald-400 hover:text-emerald-300 flex items-center gap-1 font-medium cursor-pointer"
           >
             <Eye className="w-3.5 h-3.5" />
             Ver Expediente en Pantalla
           </button>
-          <span className="text-slate-600">|</span>
+
           <button
             onClick={() => setShowUserProfileModal(true)}
             className="text-xs text-sky-400 hover:text-sky-300 flex items-center gap-1 font-medium cursor-pointer"
           >
             <UserCheck className="w-3.5 h-3.5" />
-            Configurar Auditor &amp; Normativa
+            Auditor &amp; Normativa
           </button>
-          <span className="text-slate-600">|</span>
+
           <button
             onClick={() => setShowTraceabilityModal(true)}
             className="text-xs text-teal-400 hover:text-teal-300 flex items-center gap-1 font-medium cursor-pointer"
@@ -656,56 +696,86 @@ export default function App() {
             <Clock className="w-3.5 h-3.5" />
             Trazabilidad ({traceabilityLogs.length})
           </button>
-          <span className="text-slate-600">|</span>
-          <button
-            onClick={() => setShowStreamlitFix(true)}
-            className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-3 py-1 rounded text-xs transition-colors flex items-center gap-1.5 cursor-pointer shadow"
-          >
-            <HelpCircle className="w-3.5 h-3.5" />
-            Solución Streamlit
-          </button>
         </div>
       </div>
 
-      {/* Main Layout: Sidebar + Main Content */}
+      {/* Main Layout */}
       <div className="flex-1 flex flex-col lg:flex-row">
         {/* Left Sidebar */}
         <aside className="w-full lg:w-72 bg-slate-900/90 border-r border-slate-800 p-5 flex flex-col justify-between shrink-0">
-          <div className="space-y-6">
-            {/* System Branding */}
-            <div>
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg bg-sky-500/20 border border-sky-400/30 flex items-center justify-center text-sky-400 font-bold">
-                  🔬
-                </div>
-                <div>
-                  <h1 className="font-bold text-sm text-white tracking-tight">ECOSISTEMA FORENSE</h1>
-                  <span className="text-[10px] text-sky-400 font-mono">SUPREMO PRODUCCIÓN</span>
-                </div>
+          <div className="space-y-5">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-lg bg-sky-500/20 border border-sky-400/30 flex items-center justify-center text-sky-400 font-bold">
+                🔬
+              </div>
+              <div>
+                <h1 className="font-bold text-sm text-white tracking-tight">ECOSISTEMA FORENSE</h1>
+                <span className="text-[10px] text-emerald-400 font-mono">PRODUCCIÓN • DATOS REALES</span>
               </div>
             </div>
 
-            {/* Active Entity Sidebar Card */}
+            {/* Active Entity Card */}
             <div className="bg-slate-950 border border-sky-500/30 rounded-xl p-3 space-y-1.5">
               <div className="text-[10px] font-bold uppercase tracking-wider text-sky-400 flex items-center gap-1">
                 <Building2 className="w-3.5 h-3.5" />
-                Entidad en Análisis
+                Entidad Exclusiva en Curso
               </div>
-              <div className="text-xs font-bold text-white leading-snug">{activeEntity.nombre}</div>
-              <div className="text-[10.5px] text-slate-400 font-mono">
-                {activeEntity.siglas} • RNC/NIF: {activeEntity.rncNif}
-              </div>
-              <div className="text-[10.5px] text-emerald-400 font-mono">
-                Moneda: {activeEntity.moneda} ({activeEntity.simboloMoneda})
-              </div>
+              {activeEntity ? (
+                <>
+                  <div className="text-xs font-bold text-white leading-snug">{activeEntity.nombre}</div>
+                  <div className="text-[10.5px] text-slate-400 font-mono">
+                    {activeEntity.siglas} • RNC/NIF: {activeEntity.rncNif}
+                  </div>
+                  <div className="text-[10.5px] text-emerald-400 font-mono">
+                    Moneda: {activeEntity.moneda} ({activeEntity.simboloMoneda})
+                  </div>
+                </>
+              ) : (
+                <div className="text-xs text-amber-300">
+                  Pendiente de registrar entidad real en Paso 1.
+                </div>
+              )}
             </div>
 
-            {/* Auditor Details Card */}
-            <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2">
-              <div className="flex items-center justify-between text-xs">
+            {/* Stepper Vertical Quick Nav */}
+            <div className="space-y-1.5">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                Flujo Guiado con IA (5 Pasos)
+              </div>
+              {STEP_META.map((s) => (
+                <button
+                  key={s.step}
+                  type="button"
+                  onClick={() => {
+                    setActiveStep(s.step);
+                    setShowAllSteps(false);
+                  }}
+                  className={`w-full text-left px-3 py-2 rounded-lg text-xs flex items-center gap-2 border transition-colors cursor-pointer ${
+                    activeStep === s.step && !showAllSteps
+                      ? 'bg-sky-600/20 border-sky-500/50 text-white font-semibold'
+                      : 'bg-slate-950/60 border-slate-800/80 text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <span
+                    className={`w-5 h-5 rounded-full text-[10px] font-bold flex items-center justify-center shrink-0 ${
+                      activeStep === s.step && !showAllSteps
+                        ? 'bg-sky-500 text-slate-950'
+                        : 'bg-slate-800 text-slate-300'
+                    }`}
+                  >
+                    {s.step}
+                  </span>
+                  <span className="truncate">{s.short}</span>
+                </button>
+              ))}
+            </div>
+
+            {/* Auditor & Period Quick Card */}
+            <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2 text-xs">
+              <div className="flex items-center justify-between">
                 <span className="text-slate-400 font-medium flex items-center gap-1">
                   <UserCheck className="w-3.5 h-3.5 text-sky-400" />
-                  Perito Asignado
+                  Perito
                 </span>
                 <button
                   onClick={() => setShowUserProfileModal(true)}
@@ -714,118 +784,48 @@ export default function App() {
                   Editar
                 </button>
               </div>
-              <div className="text-xs font-bold text-white leading-tight">{auditor.nombre}</div>
-              <div className="text-[10.5px] text-slate-400 font-mono">ID: {auditor.cedulaId}</div>
-              <div className="text-[10.5px] text-slate-500 truncate">{auditor.cargo}</div>
-
-              <div className="pt-2 border-t border-slate-900 flex items-center justify-between text-[10.5px]">
-                <span className="text-slate-400">Jurisdicción:</span>
-                <span className="text-slate-200 font-medium">
-                  {currentCountryConfig.bandera} {currentCountryConfig.codigo}
-                </span>
+              <div className="font-bold text-white leading-tight">
+                {auditor.nombre || 'Sin nombre asignado'}
+              </div>
+              <div className="text-[10.5px] text-slate-400 font-mono">
+                <Calendar className="w-3 h-3 inline mr-1 text-amber-400" />
+                {periodo.fechaDesde} a {periodo.fechaHasta}
               </div>
             </div>
 
-            {/* Periodo Auditado Quick Info */}
-            <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-1.5 text-xs">
-              <div className="flex items-center justify-between text-slate-400">
-                <span className="flex items-center gap-1 font-medium">
-                  <Calendar className="w-3.5 h-3.5 text-amber-400" />
-                  Período Fiscal
-                </span>
-              </div>
-              <div className="font-mono text-[11px] text-slate-200">
-                {periodo.fechaDesde} al {periodo.fechaHasta}
-              </div>
-              <div className="text-[10px] text-slate-500 line-clamp-1">
-                {periodo.alcancePericial}
-              </div>
-            </div>
-
-            {/* Threshold Quick Status Card */}
-            <div className="space-y-2 pt-1 border-t border-slate-800">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
-                  <Sliders className="w-3.5 h-3.5 text-sky-400" />
-                  <span>Umbrales Activos</span>
+            {/* Thresholds */}
+            <div className="bg-slate-950/80 border border-slate-800 p-2.5 rounded-lg space-y-1 text-[11px] font-mono">
+              <div className="flex items-center justify-between text-slate-300 pb-1 border-b border-slate-800">
+                <span className="flex items-center gap-1 font-sans font-semibold text-xs">
+                  <Sliders className="w-3 h-3 text-sky-400" /> Umbrales
                 </span>
                 <button
                   type="button"
                   onClick={() => setShowThresholdModal(true)}
-                  className="text-[10px] text-sky-400 hover:text-sky-300 font-medium cursor-pointer"
+                  className="text-[10px] text-sky-400 hover:underline font-sans cursor-pointer"
                 >
                   Ajustar
                 </button>
               </div>
-
-              <div className="bg-slate-950/80 border border-slate-800/80 p-2.5 rounded-lg space-y-1.5 text-[11px] font-mono">
-                <div className="flex justify-between text-slate-400">
-                  <span>Alerta Adenda:</span>
-                  <strong className="text-red-400">&gt; {thresholds.adendaMaxPct}%</strong>
-                </div>
-                <div className="flex justify-between text-slate-400">
-                  <span>Tolerancia Benford:</span>
-                  <strong className="text-amber-400">±{thresholds.benfordMaxDeviationPct}%</strong>
-                </div>
-                <div className="flex justify-between text-slate-400">
-                  <span>Monitoreo en Vivo:</span>
-                  <strong className={thresholds.notificacionesActivas ? 'text-emerald-400' : 'text-slate-500'}>
-                    {thresholds.notificacionesActivas ? 'ACTIVO' : 'PAUSADO'}
-                  </strong>
-                </div>
+              <div className="flex justify-between text-slate-400">
+                <span>Adendas:</span>
+                <strong className="text-red-400">&gt; {thresholds.adendaMaxPct}%</strong>
               </div>
-            </div>
-
-            {/* Carpetas Automatizadas del Caso */}
-            <div className="space-y-2 pt-1 border-t border-slate-800">
-              <div className="text-xs font-semibold uppercase tracking-wider text-slate-300 flex items-center justify-between">
-                <span className="flex items-center gap-1.5">
-                  <FolderTree className="w-3.5 h-3.5 text-sky-400" />
-                  Carpetas de Expediente
-                </span>
-                <span className="text-[10px] font-mono text-emerald-400 flex items-center gap-1">
-                  <Save className="w-3 h-3" /> Auto
-                </span>
+              <div className="flex justify-between text-slate-400">
+                <span>Benford:</span>
+                <strong className="text-amber-400">±{thresholds.benfordMaxDeviationPct}%</strong>
               </div>
-              <ul className="text-xs font-mono space-y-1 text-slate-400">
-                <li className="flex items-center gap-1.5 px-2 py-1 rounded bg-slate-950/60 border border-slate-800/50">
-                  <span className="text-sky-400 text-xs">01</span> acta_lectura/
-                </li>
-                <li className="flex items-center gap-1.5 px-2 py-1 rounded bg-slate-950/60 border border-slate-800/50">
-                  <span className="text-amber-400 text-xs">02</span> recursos_reconsideracion/
-                </li>
-                <li className="flex items-center gap-1.5 px-2 py-1 rounded bg-slate-950/60 border border-slate-800/50">
-                  <span className="text-red-400 text-xs">03</span> informe_preliminar/
-                </li>
-                <li className="flex items-center gap-1.5 px-2 py-1 rounded bg-slate-950/60 border border-slate-800/50">
-                  <span className="text-emerald-400 text-xs">04</span> replicas_descargos/
-                </li>
-                <li className="flex items-center gap-1.5 px-2 py-1 rounded bg-slate-950/60 border border-slate-800/50">
-                  <span className="text-purple-400 text-xs">05</span> entradas_evidencias/
-                </li>
-                <li className="flex items-center gap-1.5 px-2 py-1 rounded bg-slate-950/60 border border-slate-800/50">
-                  <span className="text-blue-400 text-xs">06</span> salidas_dictamenes/
-                </li>
-              </ul>
             </div>
           </div>
 
-          {/* Sidebar Footer Buttons */}
-          <div className="pt-6 border-t border-slate-800 space-y-2">
+          {/* Sidebar Footer */}
+          <div className="pt-5 border-t border-slate-800 space-y-2">
             <button
-              onClick={() => setViewingCaseOnScreen(activeCaseSnapshot)}
+              onClick={openCurrentCaseOnScreen}
               className="w-full py-2 px-3 bg-sky-600/20 hover:bg-sky-600/30 text-sky-300 border border-sky-500/30 text-xs font-medium rounded-lg flex items-center justify-center gap-2 transition-colors cursor-pointer"
             >
               <Eye className="w-3.5 h-3.5" />
-              Ver Caso en Pantalla
-            </button>
-
-            <button
-              onClick={() => setShowTraceabilityModal(true)}
-              className="w-full py-2 px-3 bg-teal-600/20 hover:bg-teal-600/30 text-teal-300 border border-teal-500/30 text-xs font-medium rounded-lg flex items-center justify-center gap-2 transition-colors cursor-pointer"
-            >
-              <Clock className="w-3.5 h-3.5" />
-              Trazabilidad y Cadena de Custodia
+              Ver Expediente en Pantalla
             </button>
 
             <button
@@ -833,57 +833,46 @@ export default function App() {
               className="w-full py-2 px-3 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg flex items-center justify-center gap-2 transition-colors cursor-pointer"
             >
               <History className="w-3.5 h-3.5 text-sky-400" />
-              Histórico de Casos ({historyList.length})
+              Casos de {activeEntity?.siglas || 'Entidad'} ({entityCases.length})
             </button>
           </div>
         </aside>
 
-        {/* Main Content Area */}
-        <main className="flex-1 p-4 sm:p-6 lg:p-8 space-y-8 overflow-y-auto max-w-7xl mx-auto w-full">
-          {/* Main Title Banner */}
-          <div className="bg-gradient-to-r from-slate-900 via-slate-900/90 to-slate-950 border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-2xl relative overflow-hidden">
-            <div className="absolute right-0 top-0 w-96 h-96 bg-sky-500/5 rounded-full blur-3xl pointer-events-none" />
-            <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
-              <div>
-                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-sky-500/10 border border-sky-500/20 text-sky-400 text-xs font-medium mb-3">
-                  <Sparkles className="w-3.5 h-3.5" />
-                  Sistema Soberano Multi-Entidad • PDF/Excel/Word/TXT • ISO/IEC 27037 &amp; NIA 240
-                </div>
-                <h1 className="text-2xl sm:text-3xl lg:text-4xl font-extrabold text-white tracking-tight flex items-center gap-3">
-                  🔬 Ecosistema de Auditoría Forense e Inteligencia de Datos
-                </h1>
-                <p className="text-sm text-slate-400 mt-2 max-w-3xl leading-relaxed">
-                  Lectura universal de evidencias digitales (PDF, Excel, Word, TXT, OCR), cambio instantáneo de entidad auditada,
-                  registro persistente de casos en pantalla y evaluación contradictoria IA adaptada a {currentCountryConfig.nombre}.
-                </p>
+        {/* Main Content */}
+        <main className="flex-1 p-4 sm:p-6 lg:p-8 space-y-6 overflow-y-auto max-w-7xl mx-auto w-full">
+          {/* Header Banner */}
+          <div className="bg-gradient-to-r from-slate-900 via-slate-900/90 to-slate-950 border border-slate-800 rounded-2xl p-5 sm:p-6 shadow-2xl flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div>
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium mb-2">
+                <Sparkles className="w-3.5 h-3.5" />
+                Entorno Limpio de Producción • Cero Datos Demo • Flujo Pericial IA Paso a Paso
               </div>
-
-              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 shrink-0">
-                <button
-                  onClick={() => setShowUserProfileModal(true)}
-                  className="px-4 py-2.5 bg-sky-600/20 hover:bg-sky-600/30 text-sky-300 border border-sky-500/40 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer"
-                >
-                  <UserCheck className="w-4 h-4 text-sky-400" />
-                  Auditor &amp; Jurisdicción
-                </button>
-
-                <button
-                  onClick={() => setShowThresholdModal(true)}
-                  className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer"
-                >
-                  <Sliders className="w-4 h-4 text-amber-400" />
-                  Umbrales de Fraude
-                </button>
-              </div>
+              <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+                🔬 Ecosistema de Auditoría Forense e Inteligencia de Datos
+              </h1>
+              <p className="text-xs sm:text-sm text-slate-400 mt-1 max-w-3xl">
+                Registra tu entidad real, extrae documentos o portales web literalmente, audita el Ciclo de Pagos y edita cualquier campo con asistencia paso a paso de IA.
+              </p>
             </div>
+
+            <button
+              type="button"
+              onClick={handleRegisterCurrentCase}
+              disabled={!activeEntity || isSavingCase}
+              className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 shrink-0 cursor-pointer shadow-lg"
+            >
+              <Save className="w-4 h-4" />
+              {isSavingCase ? 'Guardando...' : 'Guardar Avance del Caso'}
+            </button>
           </div>
 
-          {/* Multi-Entity Switcher & Case Registration Bar */}
+          {/* Entity Switcher & Registration Bar */}
           <EntitySwitcherBar
             entities={entities}
             activeEntity={activeEntity}
             onSwitchEntity={handleSwitchEntity}
-            onCreateEntity={handleCreateEntity}
+            onSaveEntity={handleSaveEntity}
+            onDeleteEntity={handleDeleteEntity}
             onRegisterCurrentCase={handleRegisterCurrentCase}
             onNewCase={handleNewCase}
             isSavingCase={isSavingCase}
@@ -891,132 +880,449 @@ export default function App() {
             activeCaseCode={activeCaseCode}
           />
 
-          {/* Risk Dashboard */}
-          <RiskDashboard
-            contractRows={contractRows}
-            thresholds={thresholds}
-            realtimeAlerts={realtimeAlerts}
-            onOpenThresholds={() => setShowThresholdModal(true)}
-            currentResult={currentResult}
-            simboloMoneda={activeEntity.simboloMoneda}
-          />
+          {/* Top 5-Step Progress Strip */}
+          {!showAllSteps && (
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+              {STEP_META.map((s) => {
+                const isCurrent = activeStep === s.step;
+                const isPast = activeStep > s.step;
+                return (
+                  <button
+                    key={s.step}
+                    type="button"
+                    onClick={() => setActiveStep(s.step)}
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                      isCurrent
+                        ? 'bg-sky-600/20 border-sky-400 text-white shadow-lg shadow-sky-950/40'
+                        : isPast
+                        ? 'bg-emerald-950/20 border-emerald-700/40 text-emerald-200 hover:border-emerald-500/60'
+                        : 'bg-slate-900/70 border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between text-[10px] font-mono uppercase">
+                      <span>Paso {s.step}</span>
+                      {isPast && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
+                    </div>
+                    <div className="text-xs font-bold mt-1 truncate">{s.short}</div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
-          {/* On-Screen Case Registry & Persistent History Table */}
-          <CaseRegistryAndHistorySection
-            cases={historyList}
-            entities={entities}
-            activeCaseId={activeCaseId}
-            onRegisterCase={handleRegisterCurrentCase}
-            onSelectCaseToLoad={handleSelectCaseFromHistory}
-            onViewCaseOnScreen={(c) => setViewingCaseOnScreen(c)}
-            onDeleteCase={handleDeleteCase}
-            isSaving={isSavingCase}
-          />
-
-          {/* Section: Gestión y Procesamiento Universal de Evidencias */}
-          <EvidenceSection
-            nombreCaso={nombreCaso}
-            setNombreCaso={setNombreCaso}
-            origenesSeleccionados={origenesSeleccionados}
-            setOrigenesSeleccionados={setOrigenesSeleccionados}
-            evidenceFile={evidenceFile}
-            setEvidenceFile={setEvidenceFile}
-            contractRows={contractRows}
-            setContractRows={setContractRows}
-            anonimizar={anonimizar}
-            setAnonimizar={setAnonimizar}
-            adendaThresholdPct={thresholds.adendaMaxPct}
-            simboloMoneda={activeEntity.simboloMoneda}
-            onFileParsed={(parsedFile, detectedCount) => {
-              logTraceabilityAction(
-                'Lectura de Evidencia Digital',
-                `Archivo ${parsedFile.name} [${parsedFile.parsedFormat || 'DIGITAL'}] procesado (${detectedCount} registros tabulares, SHA-256: ${parsedFile.sha256.substring(0, 10)}...)`,
-                'ENTRADA'
-              );
-            }}
-          />
-
-          {/* Contradictory Dossier */}
-          <ContradictoryDossierSection
-            actaLectura={actaLectura}
-            setActaLectura={setActaLectura}
-            recursos={recursos}
-            setRecursos={setRecursos}
-            informePreliminar={informePreliminar}
-            setInformePreliminar={setInformePreliminar}
-            replicas={replicas}
-            setReplicas={setReplicas}
-            nombreCaso={nombreCaso}
-            onLogAction={(accion, detalle) => logTraceabilityAction(accion, detalle, 'ENTRADA')}
-          />
-
-          {/* Observation Evaluator */}
-          <ObservationEvaluatorSection
-            observaciones={observaciones}
-            setObservaciones={setObservaciones}
-            selectedCountry={selectedCountry}
-            selectedLanguage={selectedLanguage}
-            auditor={auditor}
-            actaLecturaContext={actaLectura.contenido}
-            recursosContext={recursos.map((r) => `${r.titulo}: ${r.contenido}`).join('\n\n')}
-            onLogAction={(accion, detalle) => logTraceabilityAction(accion, detalle, 'EVALUACION')}
-          />
-
-          {/* Section: Requerimiento Analítico Forense & Consenso IA */}
-          <AnalysisSection
-            nombreCaso={nombreCaso}
-            entidadNombre={`${activeEntity.nombre} (${activeEntity.siglas})`}
-            paisNormativa={currentCountryConfig.nombre}
-            idioma={selectedLanguage}
-            origenes={origenesSeleccionados}
-            requerimiento={requerimiento}
-            setRequerimiento={setRequerimiento}
-            evidenceFile={evidenceFile}
-            anonimizar={anonimizar}
-            onAnalysisComplete={handleAnalysisComplete}
-            thresholds={thresholds}
-            setThresholds={setThresholds}
-            onOpenThresholdSettings={() => setShowThresholdModal(true)}
-            activeAlertsCount={realtimeAlerts.length}
-          />
-
-          {/* Section: Dictamen Pericial y Código Generado */}
-          {currentResult && (
-            <ResultsSection
-              resultado={currentResult}
-              nombreCaso={nombreCaso}
-              origenes={origenesSeleccionados}
-              requerimiento={requerimiento}
-              contractRows={contractRows}
-              simboloMoneda={activeEntity.simboloMoneda}
-              adendaThresholdPct={thresholds.adendaMaxPct}
-              auditor={auditor}
-              periodo={periodo}
+          {/* AI Step Coach guiding current step */}
+          {!showAllSteps && (
+            <AiStepCoach
+              currentStep={currentStepMeta.step}
+              totalSteps={STEP_META.length}
+              stepTitle={currentStepMeta.title}
+              stepSubtitle={currentStepMeta.subtitle}
+              onPrevStep={() => setActiveStep((p) => Math.max(1, p - 1))}
+              onNextStep={() => setActiveStep((p) => Math.min(5, p + 1))}
+              activeEntity={activeEntity}
+              caseName={nombreCaso}
               paisNormativa={currentCountryConfig.nombre}
-              observaciones={observaciones}
-              actaLectura={actaLectura}
-              recursos={recursos}
-              replicas={replicas}
+              idioma={selectedLanguage}
+              evidenceSummary={evidenceFile?.extractedText || evidenceFile?.contentSnippet || ''}
+              contractsCount={contractRows.length}
+              paymentsCount={paymentCycleRows.length}
+              observationsCount={observaciones.length}
+              hasFinalResult={Boolean(currentResult)}
             />
           )}
 
-          {/* Section: Análisis Estadístico y Ley de Benford */}
-          <BenfordChart
-            contractRows={contractRows}
-            adendaThresholdPct={thresholds.adendaMaxPct}
-            benfordMaxDeviationPct={thresholds.benfordMaxDeviationPct}
-            evidenceNumericAmounts={evidenceFile?.numericAmounts}
-          />
+          {/* ==================== STEP 1: ENTIDAD, PERITO, ALCANCE & EXPEDIENTES EXCLUSIVOS ==================== */}
+          {(showAllSteps || activeStep === 1) && (
+            <div className="space-y-6">
+              {!activeEntity ? (
+                <form
+                  onSubmit={handleQuickCreateEntity}
+                  className="bg-slate-900 border border-sky-500/40 rounded-2xl p-6 shadow-xl space-y-4"
+                >
+                  <div className="flex items-center gap-3 pb-3 border-b border-slate-800">
+                    <div className="w-10 h-10 rounded-xl bg-sky-500/20 text-sky-400 flex items-center justify-center">
+                      <Building2 className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h2 className="text-lg font-bold text-white">
+                        Paso 1: Registra la Entidad o Empresa Real a Auditar
+                      </h2>
+                      <p className="text-xs text-slate-400">
+                        Base de datos limpia para pruebas reales en producción. Todos los campos pueden editarse después.
+                      </p>
+                    </div>
+                  </div>
 
-          {/* Footer Note */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+                    <div className="md:col-span-2">
+                      <label className="text-slate-300 font-semibold block mb-1">Nombre Oficial de la Entidad *</label>
+                      <input
+                        type="text"
+                        required
+                        value={quickNombre}
+                        onChange={(e) => setQuickNombre(e.target.value)}
+                        placeholder="Ej: Instituto Nacional del Cáncer (INCART)"
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-sky-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-slate-300 font-semibold block mb-1">Siglas</label>
+                      <input
+                        type="text"
+                        value={quickSiglas}
+                        onChange={(e) => setQuickSiglas(e.target.value)}
+                        placeholder="Ej: INCART"
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono uppercase focus:outline-none focus:border-sky-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+                    <div>
+                      <label className="text-slate-300 font-semibold block mb-1">RNC / NIF / Identificación</label>
+                      <input
+                        type="text"
+                        value={quickRnc}
+                        onChange={(e) => setQuickRnc(e.target.value)}
+                        placeholder="Ej: 430130712"
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono focus:outline-none focus:border-sky-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-slate-300 font-semibold block mb-1">Sector</label>
+                      <input
+                        type="text"
+                        value={quickSector}
+                        onChange={(e) => setQuickSector(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-sky-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-slate-300 font-semibold block mb-1">País / Normativa</label>
+                      <select
+                        value={quickPais}
+                        onChange={(e) => setQuickPais(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-sky-500"
+                      >
+                        {PAISES_NORMATIVA.map((p) => (
+                          <option key={p.codigo} value={p.codigo}>
+                            {p.bandera} {p.nombre}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="text-xs">
+                    <label className="text-slate-300 font-semibold block mb-1">
+                      Enlace / Portal Web Oficial (Opcional)
+                    </label>
+                    <input
+                      type="text"
+                      value={quickPortal}
+                      onChange={(e) => setQuickPortal(e.target.value)}
+                      placeholder="https://portal.comprasdominicana.gob.do/..."
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono focus:outline-none focus:border-sky-500"
+                    />
+                  </div>
+
+                  <div className="text-xs">
+                    <label className="text-slate-300 font-semibold block mb-1">
+                      Antecedentes, Base Legal o Alcance Real (Opcional)
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={quickDescripcion}
+                      onChange={(e) => setQuickDescripcion(e.target.value)}
+                      placeholder="Pegue antecedentes, marco legal, alcance u observaciones iniciales de la entidad..."
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none focus:border-sky-500"
+                    />
+                  </div>
+
+                  <div className="flex justify-end">
+                    <button
+                      type="submit"
+                      className="px-5 py-2.5 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer shadow-lg"
+                    >
+                      <Plus className="w-4 h-4" />
+                      Registrar Entidad y Continuar al Paso 2
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <UserCheck className="w-4 h-4 text-sky-400" />
+                    Datos Editables del Auditor, Período y Jurisdicción para {activeEntity.siglas}
+                  </h3>
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
+                    <div>
+                      <label className="text-slate-400 block mb-1">Auditor Responsable</label>
+                      <input
+                        type="text"
+                        value={auditor.nombre}
+                        onChange={(e) => setAuditor((p) => ({ ...p, nombre: e.target.value }))}
+                        placeholder="Nombre del auditor"
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-slate-400 block mb-1">Cédula / ID</label>
+                      <input
+                        type="text"
+                        value={auditor.cedulaId}
+                        onChange={(e) => setAuditor((p) => ({ ...p, cedulaId: e.target.value }))}
+                        placeholder="001-0000000-0"
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-slate-400 block mb-1">Período Desde</label>
+                      <input
+                        type="date"
+                        value={periodo.fechaDesde}
+                        onChange={(e) => setPeriodo((p) => ({ ...p, fechaDesde: e.target.value }))}
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-slate-400 block mb-1">Período Hasta</label>
+                      <input
+                        type="date"
+                        value={periodo.fechaHasta}
+                        onChange={(e) => setPeriodo((p) => ({ ...p, fechaHasta: e.target.value }))}
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <CaseRegistryAndHistorySection
+                cases={entityCases}
+                activeEntity={activeEntity}
+                activeCaseId={activeCaseId}
+                onRegisterCase={handleRegisterCurrentCase}
+                onSelectCaseToLoad={handleSelectCaseFromHistory}
+                onViewCaseOnScreen={(c) => setViewingCaseOnScreen(c)}
+                onDeleteCase={handleDeleteCase}
+                isSaving={isSavingCase}
+              />
+            </div>
+          )}
+
+          {/* ==================== STEP 2: EVIDENCIA REAL (ARCHIVO / LINK / TEXTO) ==================== */}
+          {(showAllSteps || activeStep === 2) && (
+            <EvidenceSection
+              nombreCaso={nombreCaso}
+              setNombreCaso={setNombreCaso}
+              origenesSeleccionados={origenesSeleccionados}
+              setOrigenesSeleccionados={setOrigenesSeleccionados}
+              evidenceFile={evidenceFile}
+              setEvidenceFile={setEvidenceFile}
+              contractRows={contractRows}
+              setContractRows={setContractRows}
+              anonimizar={anonimizar}
+              setAnonimizar={setAnonimizar}
+              adendaThresholdPct={thresholds.adendaMaxPct}
+              simboloMoneda={activeCurrencySymbol}
+              entityName={activeEntity?.nombre || ''}
+              entityUrlPortal={activeEntity?.urlPortal || ''}
+              paisNormativa={currentCountryConfig.nombre}
+              onFileParsed={(parsedFile, detectedCount, paymentsCount) => {
+                logTraceabilityAction(
+                  'Ingesta de Evidencia Real',
+                  `Fuente ${parsedFile.name} [${parsedFile.parsedFormat || 'DIGITAL'}] (${detectedCount} contratos, ${paymentsCount} pagos, SHA-256: ${parsedFile.sha256.substring(0, 10)}...)`,
+                  'ENTRADA'
+                );
+              }}
+              onStructuredExtracted={handleStructuredExtracted}
+              onLogAction={(accion, detalle) => logTraceabilityAction(accion, detalle, 'ENTRADA')}
+            />
+          )}
+
+          {/* ==================== STEP 3: CICLO DE PAGOS Y LEY DE BENFORD ==================== */}
+          {(showAllSteps || activeStep === 3) && (
+            <div className="space-y-6">
+              <PaymentCycleSection
+                entityName={activeEntity?.nombre || 'Entidad en Curso'}
+                paisNormativa={currentCountryConfig.nombre}
+                idioma={selectedLanguage}
+                simboloMoneda={activeCurrencySymbol}
+                paymentCycleRows={paymentCycleRows}
+                setPaymentCycleRows={setPaymentCycleRows}
+                contractRows={contractRows}
+                onLogAction={(accion, detalle) => logTraceabilityAction(accion, detalle, 'EVALUACION')}
+              />
+
+              <BenfordChart
+                contractRows={contractRows}
+                paymentCycleRows={paymentCycleRows}
+                adendaThresholdPct={thresholds.adendaMaxPct}
+                benfordMaxDeviationPct={thresholds.benfordMaxDeviationPct}
+                evidenceNumericAmounts={evidenceFile?.numericAmounts}
+              />
+            </div>
+          )}
+
+          {/* ==================== STEP 4: DIRECTORES, DOSSIER Y OBSERVACIONES ==================== */}
+          {(showAllSteps || activeStep === 4) && (
+            <div className="space-y-6">
+              <DirectorResponsibilitySection
+                activeEntity={activeEntity}
+                paisNormativa={currentCountryConfig.nombre}
+                idioma={selectedLanguage}
+                periodo={periodo}
+                simboloMoneda={activeCurrencySymbol}
+                directors={directors}
+                setDirectors={setDirectors}
+                contractRows={contractRows}
+                paymentCycleRows={paymentCycleRows}
+                observaciones={observaciones}
+                recursos={recursos}
+                replicas={replicas}
+                contraReplicas={contraReplicas}
+                onLogAction={(accion, detalle) => logTraceabilityAction(accion, detalle, 'EVALUACION')}
+              />
+
+              <ContradictoryDossierSection
+                actaLectura={actaLectura}
+                setActaLectura={setActaLectura}
+                recursos={recursos}
+                setRecursos={setRecursos}
+                informePreliminar={informePreliminar}
+                setInformePreliminar={setInformePreliminar}
+                replicas={replicas}
+                setReplicas={setReplicas}
+                contraReplicas={contraReplicas}
+                setContraReplicas={setContraReplicas}
+                directors={directors}
+                nombreCaso={nombreCaso}
+                onLogAction={(accion, detalle) => logTraceabilityAction(accion, detalle, 'ENTRADA')}
+              />
+
+              <ObservationEvaluatorSection
+                observaciones={observaciones}
+                setObservaciones={setObservaciones}
+                selectedCountry={selectedCountry}
+                selectedLanguage={selectedLanguage}
+                auditor={auditor}
+                actaLecturaContext={actaLectura.contenido}
+                recursosContext={[...recursos, ...replicas, ...contraReplicas]
+                  .map((r) => `${r.titulo} [${r.periodoEtiqueta || r.fecha}]: ${r.contenido}`)
+                  .join('\n\n')}
+                simboloMoneda={activeCurrencySymbol}
+                onLogAction={(accion, detalle) => logTraceabilityAction(accion, detalle, 'EVALUACION')}
+              />
+            </div>
+          )}
+
+          {/* ==================== STEP 5: EJECUTOR PRE-REVISIÓN, DICTAMEN FINAL, MEJORAS IA ==================== */}
+          {(showAllSteps || activeStep === 5) && (
+            <div className="space-y-6">
+              <InteractivePreReviewRunnerSection
+                activeEntity={activeEntity}
+                auditor={auditor}
+                periodo={periodo}
+                paisNormativa={currentCountryConfig.nombre}
+                idioma={selectedLanguage}
+                actaLectura={actaLectura}
+                setActaLectura={setActaLectura}
+                informePreliminar={informePreliminar}
+                setInformePreliminar={setInformePreliminar}
+                recursos={recursos}
+                replicas={replicas}
+                contraReplicas={contraReplicas}
+                directors={directors}
+                contractRows={contractRows}
+                paymentCycleRows={paymentCycleRows}
+                observaciones={observaciones}
+                resultado={currentResult}
+                preReviewReports={preReviewReports}
+                setPreReviewReports={setPreReviewReports}
+                onLogAction={(accion, detalle) => logTraceabilityAction(accion, detalle, 'EVALUACION')}
+              />
+
+              <RiskDashboard
+                contractRows={contractRows}
+                paymentCycleRows={paymentCycleRows}
+                thresholds={thresholds}
+                realtimeAlerts={realtimeAlerts}
+                onOpenThresholds={() => setShowThresholdModal(true)}
+                currentResult={currentResult}
+                simboloMoneda={activeCurrencySymbol}
+              />
+
+              <AnalysisSection
+                nombreCaso={nombreCaso || `Caso_${activeEntity?.siglas || 'Forense'}`}
+                entidadNombre={activeEntity ? `${activeEntity.nombre} (${activeEntity.siglas})` : 'Entidad Auditada'}
+                entidadDescripcion={activeEntity?.descripcion || ''}
+                paisNormativa={currentCountryConfig.nombre}
+                idioma={selectedLanguage}
+                origenes={origenesSeleccionados}
+                requerimiento={requerimiento}
+                setRequerimiento={setRequerimiento}
+                evidenceFile={evidenceFile}
+                contractRows={contractRows}
+                paymentCycleRows={paymentCycleRows}
+                observaciones={observaciones}
+                directors={directors}
+                actaLectura={actaLectura}
+                informePreliminar={informePreliminar}
+                recursos={recursos}
+                replicas={replicas}
+                contraReplicas={contraReplicas}
+                anonimizar={anonimizar}
+                onAnalysisComplete={handleAnalysisComplete}
+                thresholds={thresholds}
+                setThresholds={setThresholds}
+                onOpenThresholdSettings={() => setShowThresholdModal(true)}
+                activeAlertsCount={realtimeAlerts.length}
+              />
+
+              {currentResult && (
+                <ResultsSection
+                  resultado={currentResult}
+                  nombreCaso={nombreCaso || `Caso_${activeEntity?.siglas || 'Forense'}`}
+                  origenes={origenesSeleccionados}
+                  requerimiento={requerimiento}
+                  contractRows={contractRows}
+                  paymentCycleRows={paymentCycleRows}
+                  simboloMoneda={activeCurrencySymbol}
+                  adendaThresholdPct={thresholds.adendaMaxPct}
+                  auditor={auditor}
+                  periodo={periodo}
+                  paisNormativa={currentCountryConfig.nombre}
+                  observaciones={observaciones}
+                  actaLectura={actaLectura}
+                  recursos={recursos}
+                  replicas={replicas}
+                  contraReplicas={contraReplicas}
+                  directors={directors}
+                />
+              )}
+
+              <CaseRegistryAndHistorySection
+                cases={entityCases}
+                activeEntity={activeEntity}
+                activeCaseId={activeCaseId}
+                onRegisterCase={handleRegisterCurrentCase}
+                onSelectCaseToLoad={handleSelectCaseFromHistory}
+                onViewCaseOnScreen={(c) => setViewingCaseOnScreen(c)}
+                onDeleteCase={handleDeleteCase}
+                isSaving={isSavingCase}
+              />
+            </div>
+          )}
+
+          {/* Footer */}
           <footer className="text-center py-6 border-t border-slate-900 text-xs text-slate-500 space-y-1">
             <p>
-              Ecosistema de Auditoría Forense e Inteligencia de Datos • Entidad: {activeEntity.siglas} • Perito:{' '}
-              {auditor.nombre} ({auditor.cedulaId})
+              Ecosistema de Auditoría Forense • Entidad Activa: {activeEntity?.siglas || 'Pendiente'} • Auditor:{' '}
+              {auditor.nombre || 'Por asignar'}
             </p>
             <p className="text-[11px] text-slate-600">
-              Cumplimiento estricto con estándares ISO/IEC 27037 para el tratamiento de evidencia digital y normas NIA 240 /
-              ISA 500.
+              ISO/IEC 27037 • NIA 240 / ISA 500 • Procesamiento exclusivo sobre datos reales suministrados.
             </p>
           </footer>
         </main>
@@ -1025,8 +1331,8 @@ export default function App() {
       {/* Real-time Alert Toast Banner */}
       <RealtimeAlertBanner
         alerts={realtimeAlerts}
-        onDismissAlert={handleDismissAlert}
-        onClearAll={handleClearAllAlerts}
+        onDismissAlert={(id) => setRealtimeAlerts((prev) => prev.filter((a) => a.id !== id))}
+        onClearAll={() => setRealtimeAlerts([])}
         onOpenSettings={() => setShowThresholdModal(true)}
       />
 
@@ -1052,7 +1358,7 @@ export default function App() {
         onSave={() =>
           logTraceabilityAction(
             'Actualización de Perfil y Alcance',
-            `Auditor: ${auditor.nombre}, Jurisdicción: ${selectedCountry}, Período: ${periodo.fechaDesde} a ${periodo.fechaHasta}`,
+            `Auditor: ${auditor.nombre || 'N/D'}, Jurisdicción: ${selectedCountry}, Período: ${periodo.fechaDesde} a ${periodo.fechaHasta}`,
             'ENTRADA'
           )
         }
@@ -1063,7 +1369,7 @@ export default function App() {
         isOpen={showTraceabilityModal}
         onClose={() => setShowTraceabilityModal(false)}
         logs={traceabilityLogs}
-        nombreCaso={nombreCaso}
+        nombreCaso={nombreCaso || 'Expediente Actual'}
       />
 
       {/* Threshold Configuration Modal */}
@@ -1075,17 +1381,11 @@ export default function App() {
         contractRows={contractRows}
       />
 
-      {/* Streamlit Fix Diagnosis Modal */}
-      <StreamlitFixModal
-        isOpen={showStreamlitFix}
-        onClose={() => setShowStreamlitFix(false)}
-      />
-
-      {/* Case History Modal */}
+      {/* Entity-Scoped History Modal */}
       <HistoryModal
         isOpen={showHistory}
         onClose={() => setShowHistory(false)}
-        cases={historyList}
+        cases={entityCases}
         onSelectCase={handleSelectCaseFromHistory}
         onViewCaseOnScreen={(c) => setViewingCaseOnScreen(c)}
       />

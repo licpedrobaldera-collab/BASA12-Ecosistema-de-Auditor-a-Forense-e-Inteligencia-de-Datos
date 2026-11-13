@@ -63,47 +63,4 @@ export const PAISES_NORMATIVA: PaisNormativaConfig[] = [
   },
 ];
 
-export const INITIAL_OBSERVACIONES_SAMPLE: ObservacionDecision[] = [
-  {
-    id: 'obs-001',
-    codigoObservacion: 'OBS-CONT-01',
-    titulo: 'Adenda excesiva superior al límite legal del 50% en contrato de mantenimiento eléctrico',
-    descripcionPreliminar: 'Se identificó que el contrato CT-EDE-2024-041 suscrito originalmente por RD$ 24,500,000 fue objeto de la Adenda No. 1 por un monto de RD$ 18,200,000, lo que representa un incremento del 74.29% sobre el valor original adjudicado.',
-    descargoAlegato: 'La entidad auditada y el contratista argumentan que la adenda se debió a una situación de emergencia imprevista provocada por fluctuaciones extremas de voltaje y tormentas en la región Este, adjuntando informe técnico de campo y orden de compra de emergencia.',
-    decision: 'SE_MANTIENE',
-    criterioEvaluacion: 'El Art. 31 de la Ley 340-06 prohíbe taxativamente modificaciones contractuales que sobrepasen el 25% (o hasta 50% en situaciones excepcionales expresamente justificadas por la máxima autoridad antes de su suscripción). En el expediente no consta resolución motivada previa ni autorización de DGCP, por lo que el descargo resulta insuficiente de derecho.',
-    procedimientoUtilizado: 'Cotejo documental de expedientes, cálculo de variaciones porcentuales, verificación de fechas de suscripción versus declaratorias de emergencia oficiales.',
-    fundamentacionLegal: 'Ley 340-06 Art. 31; Reglamento 543-12 Art. 112; NIA 240 párrafos 10 y 25 sobre elusión de controles por la administración.',
-    normativaPais: 'República Dominicana',
-    severidad: 'CRÍTICA',
-    montoInvolucrado: 18200000,
-  },
-  {
-    id: 'obs-002',
-    codigoObservacion: 'OBS-FIN-02',
-    titulo: 'Falta de soporte de comprobante fiscal con valor de crédito (e-CF) en pagos por RD$ 2,500,000',
-    descripcionPreliminar: 'En la muestra de pagos del mes de mayo 2024, se desembolsó la suma de RD$ 2,500,000 sustentado únicamente en un recibo provisional interno sin el correspondiente e-CF con Registro Nacional del Contribuyente válido ante la DGII.',
-    descargoAlegato: 'En el Recurso de Reconsideración No. 1, la Dirección de Finanzas anexa la factura electrónica fiscal definitiva emitida con fecha extemporánea, junto a la constancia de retención impositiva del ITBIS efectuada en el período siguiente.',
-    decision: 'SE_ELIMINA',
-    criterioEvaluacion: 'Se corroboró ante la consulta web oficial de comprobantes de la DGII la validez y autenticidad del e-CF aportado en el descargo. Habiéndose comprobado la retención impositiva y el ingreso efectivo del gasto a la contabilidad sin perjuicio al erario, la observación ha sido subsanada documentalmente en su totalidad.',
-    procedimientoUtilizado: 'Confirmación externa automatizada de e-CF ante la base de datos de la administración tributaria, validación de libro mayor y conciliación de retenciones.',
-    fundamentacionLegal: 'Código Tributario Art. 50; Norma General 06-2018 sobre Comprobantes Fiscales; NIA 500 Evidencia de Auditoría.',
-    normativaPais: 'República Dominicana',
-    severidad: 'LEVE',
-    montoInvolucrado: 2500000,
-  },
-  {
-    id: 'obs-003',
-    codigoObservacion: 'OBS-LIC-03',
-    titulo: 'Presunto fraccionamiento de compras menores para eludir licitación pública nacional',
-    descripcionPreliminar: 'Se observaron tres órdenes de compras consecutivas emitidas al mismo proveedor en un lapso de 48 horas por montos de RD$ 185,000, RD$ 190,000 y RD$ 195,000, sumando RD$ 570,000.',
-    descargoAlegato: 'La entidad manifiesta que los requerimientos provinieron de tres departamentos operativos distintos e independientes (Logística, Almacén y Operaciones) que no coordinaron las compras de forma centralizada.',
-    decision: 'SE_MODIFICA',
-    criterioEvaluacion: 'Aunque se descarta dolo o colusión dolosa con el proveedor debido a que los insumos fueron efectivamente recibidos y utilizados en distintas localidades, subsiste una debilidad de control interno grave en la consolidación de requerimientos de compras de conformidad con la Ley 10-07.',
-    procedimientoUtilizado: 'Análisis cronológico de solicitudes departamentales, inspección física de entradas de almacén y entrevistas con responsables de compras.',
-    fundamentacionLegal: 'Ley 340-06 Art. 16 sobre prohibición de fraccionamiento; Ley 10-07 Art. 14 de Control Interno; Marco COSO Componente Actividades de Control.',
-    normativaPais: 'República Dominicana',
-    severidad: 'MEDIA',
-    montoInvolucrado: 570000,
-  },
-];
+export const INITIAL_OBSERVACIONES_SAMPLE: ObservacionDecision[] = [];

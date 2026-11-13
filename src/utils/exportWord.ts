@@ -4,7 +4,10 @@ import {
   AuditPeriodScope,
   ObservacionDecision,
   DossierSectionItem,
+  PaymentCycleRow,
+  DirectorResponsibility,
 } from '../types/forensic';
+import { formatCurrency } from './entities';
 
 export function downloadWordReport(data: {
   nombreCaso: string;
@@ -16,33 +19,40 @@ export function downloadWordReport(data: {
   periodo?: AuditPeriodScope;
   paisNormativa?: string;
   observaciones?: ObservacionDecision[];
+  paymentCycleRows?: PaymentCycleRow[];
+  simboloMoneda?: string;
   actaLectura?: DossierSectionItem;
   recursos?: DossierSectionItem[];
   replicas?: DossierSectionItem[];
+  contraReplicas?: DossierSectionItem[];
+  directors?: DirectorResponsibility[];
 }) {
   const {
     nombreCaso,
-    origenes,
     requerimiento,
     selloDigital,
     resultado,
     auditor = {
-      nombre: 'Lic. Pedro Baldera',
-      cedulaId: '001-1234567-8',
-      cargo: 'Director Global de Auditoría Forense',
-      entidad: 'Big 4 Forensic Audit Services',
+      nombre: 'Auditor Responsable',
+      cedulaId: 'N/D',
+      cargo: 'Auditor Forense',
+      entidad: 'Unidad de Auditoría Forense',
       pais: 'República Dominicana',
     },
     periodo = {
-      fechaDesde: '2024-01-01',
-      fechaHasta: '2024-12-31',
-      alcancePericial: 'Auditoría integral de adendas, erogaciones y contratos',
+      fechaDesde: '2025-01-01',
+      fechaHasta: '2025-12-31',
+      alcancePericial: 'Auditoría integral de contrataciones y ciclo de pagos.',
     },
     paisNormativa = 'República Dominicana',
     observaciones = [],
+    paymentCycleRows = [],
+    simboloMoneda = 'RD$',
     actaLectura,
     recursos = [],
     replicas = [],
+    contraReplicas = [],
+    directors = [],
   } = data;
 
   const fecha = new Date().toLocaleDateString('es-DO', {
@@ -62,7 +72,6 @@ export function downloadWordReport(data: {
     body { font-family: 'Calibri', 'Segoe UI', Arial, sans-serif; font-size: 11pt; color: #1e293b; line-height: 1.5; }
     h1 { color: #0f172a; font-size: 18pt; border-bottom: 2px solid #0284c7; padding-bottom: 8px; margin-bottom: 12px; }
     h2 { color: #0369a1; font-size: 13pt; margin-top: 18px; border-bottom: 1px solid #cbd5e1; padding-bottom: 4px; }
-    h3 { color: #334155; font-size: 11.5pt; margin-top: 12px; }
     table { width: 100%; border-collapse: collapse; margin-top: 8px; margin-bottom: 14px; }
     th { background-color: #0f172a; color: #ffffff; padding: 7px 9px; font-weight: bold; text-align: left; font-size: 9.5pt; }
     td { border: 1px solid #cbd5e1; padding: 6px 8px; font-size: 9.5pt; }
@@ -79,7 +88,7 @@ export function downloadWordReport(data: {
   <h1>DICTAMEN TÉCNICO PERICIAL Y RESOLUCIÓN CONTRADICTORIA</h1>
   <p><strong>Fecha de Emisión:</strong> ${fecha}</p>
   <p><strong>Jurisdicción y Normativa Aplicable:</strong> ${paisNormativa}</p>
-  
+
   <table>
     <tr>
       <th colspan="2">1. FICHA TÉCNICA DEL EXPEDIENTE Y AUDITOR ACTUANTE</th>
@@ -102,7 +111,7 @@ export function downloadWordReport(data: {
     </tr>
     <tr>
       <td><strong>Alcance Pericial:</strong></td>
-      <td>${periodo.alcancePericial || 'Examen analítico forense de erogaciones y contratos.'}</td>
+      <td>${periodo.alcancePericial || 'Examen analítico forense.'}</td>
     </tr>
     <tr>
       <td><strong>Sello Criptográfico SHA-256:</strong></td>
@@ -110,19 +119,89 @@ export function downloadWordReport(data: {
     </tr>
   </table>
 
-  <h2>2. Resumen Ejecutivo del Dictamen y Metodología R-C-T-F</h2>
-  <p>${resultado.resumenEjecutivo || 'Se procedió con la evaluación forense de las observaciones, descargos de reconsideración y pruebas documentales aportadas.'}</p>
+  <h2>2. Resumen Ejecutivo del Dictamen</h2>
+  <p>${resultado.resumenEjecutivo || 'Evaluación forense basada en los datos reales suministrados.'}</p>
   <p><strong>Requerimiento Analítico Pericial:</strong> ${requerimiento}</p>
 
-  <h2>3. Fases del Procedimiento Contradictorio y Carpetas del Dossier</h2>
-  <p>De conformidad con las normas de debido proceso e igualdad de armas (NIA 240 / ISO 27037):</p>
+  ${
+    resultado.mejorasControlInterno && resultado.mejorasControlInterno.length > 0
+      ? `
+  <h2>3. Mejoras de Control Interno y Procedimientos Recomendadas</h2>
   <ul>
-    <li><strong>Acta de Lectura:</strong> ${actaLectura?.titulo || 'Acta de Apertura de Plazo Notificada'} (${actaLectura?.archivos.length || 0} archivo(s))</li>
-    <li><strong>Recursos de Reconsideración:</strong> ${recursos.length} escrito(s) de reconsideración analizados.</li>
-    <li><strong>Réplicas y Nuevas Pruebas:</strong> ${replicas.length} escrito(s) de réplica con pruebas sobrevenidas.</li>
+    ${resultado.mejorasControlInterno.map((m) => `<li>${m}</li>`).join('')}
+  </ul>`
+      : ''
+  }
+
+  <h2>4. Fases del Procedimiento Contradictorio Multi-Período</h2>
+  <ul>
+    <li><strong>Acta de Lectura:</strong> ${actaLectura?.titulo || 'Sin acta registrada'} (${actaLectura?.archivos.length || 0} archivo(s))</li>
+    <li><strong>Recursos de Reconsideración:</strong> ${recursos.length} escrito(s) analizados.</li>
+    <li><strong>Réplicas y Descargos:</strong> ${replicas.length} escrito(s) por período y titular.</li>
+    <li><strong>Contra-Réplicas Técnicas:</strong> ${contraReplicas.length} escrito(s) registrados.</li>
   </ul>
 
-  <h2>4. Resolución Pericial de Observaciones (Decisión Motivada)</h2>
+  ${
+    directors.length > 0
+      ? `
+  <h2>4B. Segregación de Responsabilidad por Directores y Decretos Oficiales</h2>
+  <table>
+    <tr>
+      <th>Director / Titular</th>
+      <th>Decreto Oficial</th>
+      <th>Período Gestión</th>
+      <th>Fuentes y Ubicación de Origen</th>
+    </tr>
+    ${directors
+      .map(
+        (d) => `
+    <tr>
+      <td><strong>${d.nombre}</strong><br/><span style="font-size:8.5pt;">${d.cargo}</span></td>
+      <td>${d.numeroDecretoNombramiento || 'Por verificar'}</td>
+      <td>${d.fechaInicioGestion || 'N/D'} a ${d.enFuncionesActuales ? 'Actualidad' : d.fechaFinGestion || 'N/D'}</td>
+      <td>${
+        d.fuentes && d.fuentes.length > 0
+          ? d.fuentes.map((f) => `${f.ubicacionOrigen}${f.url ? ` (${f.url})` : ''}`).join('<br/>')
+          : 'Sin fuente web adjunta'
+      }</td>
+    </tr>`
+      )
+      .join('')}
+  </table>`
+      : ''
+  }
+
+  ${
+    paymentCycleRows.length > 0
+      ? `
+  <h2>5. Trazabilidad del Ciclo de Pagos (${paymentCycleRows.length} desembolsos)</h2>
+  <table>
+    <tr>
+      <th>Orden / Contrato</th>
+      <th>Beneficiario</th>
+      <th>e-CF / Libramiento</th>
+      <th>Facturado</th>
+      <th>Neto Pagado</th>
+      <th>Estado</th>
+    </tr>
+    ${paymentCycleRows
+      .map(
+        (p) => `
+    <tr>
+      <td>${p.ordenNumero} / ${p.contratoId}</td>
+      <td>${p.beneficiario}</td>
+      <td>${p.numeroFacturaEcf || 'N/D'} • ${p.numeroLibramientoPago || 'N/D'}</td>
+      <td>${formatCurrency(p.montoFacturado, simboloMoneda)}</td>
+      <td>${formatCurrency(p.montoPagadoNeto, simboloMoneda)}</td>
+      <td>${p.estadoCiclo}</td>
+    </tr>`
+      )
+      .join('')}
+  </table>`
+      : ''
+  }
+
+  <h2>6. Resolución Pericial de Observaciones</h2>
   <table>
     <tr>
       <th width="12%">Código</th>
@@ -137,7 +216,7 @@ export function downloadWordReport(data: {
       <td style="font-family: monospace; font-weight: bold;">${o.codigoObservacion}</td>
       <td>
         <strong>${o.titulo}</strong><br/>
-        <span style="font-size: 8.5pt; color: #475569;">Descargo: ${o.descargoAlegato.slice(0, 180)}...</span>
+        <span style="font-size: 8.5pt; color: #475569;">Descargo: ${(o.descargoAlegato || '').slice(0, 180)}</span>
       </td>
       <td>
         <span class="${
@@ -147,7 +226,7 @@ export function downloadWordReport(data: {
             ? 'badge-elimina'
             : 'badge-modifica'
         }">
-          ${o.decision === 'SE_MANTIENE' ? 'SE MANTIENE' : o.decision === 'SE_ELIMINA' ? 'SE ELIMINA' : 'SE MODIFICA'}
+          ${o.decision}
         </span>
       </td>
       <td>
@@ -159,11 +238,11 @@ export function downloadWordReport(data: {
       .join('')}
   </table>
 
-  <h2>5. Algoritmo Forense Certificado (Python Pandas)</h2>
+  <h2>7. Algoritmo Forense Certificado (Python)</h2>
   <div class="code-box">${(resultado.codigoPython || '# Algoritmo pericial').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
 
-  <h2>6. Acción Inmediata Recomendada</h2>
-  <p><strong>${resultado.metricasRiesgo?.accionInmediata || 'Preservación de documentos originales y auditoría en sitio.'}</strong></p>
+  <h2>8. Acción Inmediata Recomendada</h2>
+  <p><strong>${resultado.metricasRiesgo?.accionInmediata || 'Preservación de documentos originales.'}</strong></p>
 
   <div class="signature-box">
     <strong>${auditor.nombre}</strong><br/>
@@ -173,7 +252,7 @@ export function downloadWordReport(data: {
   </div>
 
   <div class="footer">
-    <p>Este informe pericial y sus anexos cumplen con los estándares de la norma ISO/IEC 27037 sobre adquisición de evidencia digital y normas NIA 240 / ISA 500. La integridad del expediente está respaldada mediante el sello SHA-256 indicado en el encabezado.</p>
+    <p>Informe conforme a ISO/IEC 27037 y NIA 240 / ISA 500. Sello SHA-256: ${selloDigital}</p>
   </div>
 </body>
 </html>

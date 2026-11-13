@@ -1,17 +1,36 @@
 import React, { useState } from 'react';
 import { Sparkles, Terminal, ShieldAlert, Cpu, ArrowRight, Bell, BellOff, Sliders } from 'lucide-react';
 import { FORENSIC_TEMPLATES } from '../utils/sampleData';
-import { EvidenceFile, ForensicAnalysisResult, ForensicThresholds } from '../types/forensic';
+import {
+  ContractEvidenceRow,
+  DirectorResponsibility,
+  DossierSectionItem,
+  EvidenceFile,
+  ForensicAnalysisResult,
+  ForensicThresholds,
+  ObservacionDecision,
+  PaymentCycleRow,
+} from '../types/forensic';
 
 interface Props {
   nombreCaso: string;
   entidadNombre?: string;
+  entidadDescripcion?: string;
   paisNormativa?: string;
   idioma?: string;
   origenes: string[];
   requerimiento: string;
   setRequerimiento: (val: string) => void;
   evidenceFile: EvidenceFile | null;
+  contractRows?: ContractEvidenceRow[];
+  paymentCycleRows?: PaymentCycleRow[];
+  observaciones?: ObservacionDecision[];
+  directors?: DirectorResponsibility[];
+  actaLectura?: DossierSectionItem;
+  informePreliminar?: DossierSectionItem;
+  recursos?: DossierSectionItem[];
+  replicas?: DossierSectionItem[];
+  contraReplicas?: DossierSectionItem[];
   anonimizar: boolean;
   onAnalysisComplete: (result: ForensicAnalysisResult) => void;
   thresholds: ForensicThresholds;
@@ -23,12 +42,22 @@ interface Props {
 export const AnalysisSection: React.FC<Props> = ({
   nombreCaso,
   entidadNombre = 'Entidad Auditada',
+  entidadDescripcion = '',
   paisNormativa = 'República Dominicana',
   idioma = 'Español',
   origenes,
   requerimiento,
   setRequerimiento,
   evidenceFile,
+  contractRows = [],
+  paymentCycleRows = [],
+  observaciones = [],
+  directors = [],
+  actaLectura,
+  informePreliminar,
+  recursos = [],
+  replicas = [],
+  contraReplicas = [],
   anonimizar,
   onAnalysisComplete,
   thresholds,
@@ -63,21 +92,21 @@ export const AnalysisSection: React.FC<Props> = ({
 
     setLoading(true);
     setErrorMsg(null);
-    setProgress(15);
-    setStatusMessage('1/4: Estableciendo conexión con servidor y sellado digital...');
+    setProgress(20);
+    setStatusMessage('1/4: Sellando evidencias reales y preparando expediente exclusivo...');
 
     try {
-      setTimeout(() => {
-        setProgress(40);
-        setStatusMessage('2/4: Evaluando evidencias con Gemini 3.8 (Metodología R-C-T-F)...');
-      }, 700);
+      const t1 = setTimeout(() => {
+        setProgress(50);
+        setStatusMessage('2/4: Analizando documentos, contratos y ciclo de pagos con Gemini 4...');
+      }, 650);
 
-      setTimeout(() => {
-        setProgress(75);
-        setStatusMessage('3/4: Ejecutando consenso y blindaje de código Python (Consensus Engine)...');
-      }, 1800);
+      const t2 = setTimeout(() => {
+        setProgress(80);
+        setStatusMessage('3/4: Generando mejoras de control interno y script Python auditable...');
+      }, 1600);
 
-      const fullEvidence = (evidenceFile?.extractedText || evidenceFile?.contentSnippet || '').slice(0, 8000);
+      const fullEvidence = (evidenceFile?.extractedText || evidenceFile?.contentSnippet || '').slice(0, 12000);
 
       const response = await fetch('/api/forensic/analyze', {
         method: 'POST',
@@ -85,28 +114,41 @@ export const AnalysisSection: React.FC<Props> = ({
         body: JSON.stringify({
           nombreCaso,
           entidadNombre,
+          entidadDescripcion,
           paisNormativa,
           idioma,
           origenes,
           requerimiento,
           evidenciaSnippet: fullEvidence,
+          contractRows,
+          paymentCycleRows,
+          observaciones,
+          directors,
+          actaLectura,
+          informePreliminar,
+          recursos,
+          replicas,
+          contraReplicas,
           anonimizar,
-          modelo: 'gemini-3.8-flash',
         }),
       });
+
+      clearTimeout(t1);
+      clearTimeout(t2);
 
       const data = await response.json();
 
       if (!response.ok || !data.success) {
-        throw new Error(data.error || 'Error al ejecutar el análisis con Gemini');
+        throw new Error(data.error || 'Error al ejecutar el análisis con IA');
       }
 
       setProgress(100);
-      setStatusMessage('4/4: Consenso pericial completado con éxito.');
+      setStatusMessage(`4/4: Dictamen emitido con éxito (${data.modelUsed || 'gemini-4-hydrogen'}).`);
 
       const result: ForensicAnalysisResult = {
         resumenEjecutivo: data.data.resumenEjecutivo,
-        banderasRojas: data.data.banderasRojas,
+        banderasRojas: data.data.banderasRojas || [],
+        mejorasControlInterno: data.data.mejorasControlInterno || [],
         codigoPython: data.data.codigoPython,
         explicacionTecnica: data.data.explicacionTecnica,
         fundamentoLegal: data.data.fundamentoLegal,
@@ -119,7 +161,7 @@ export const AnalysisSection: React.FC<Props> = ({
       setTimeout(() => {
         onAnalysisComplete(result);
         setLoading(false);
-      }, 400);
+      }, 300);
     } catch (err: any) {
       console.error(err);
       setErrorMsg(err.message || 'Error en ejecución pericial');
@@ -136,21 +178,21 @@ export const AnalysisSection: React.FC<Props> = ({
             🔬
           </div>
           <div>
-            <h2 className="text-xl font-bold text-white flex items-center gap-2">
-              Requerimiento Analítico Forense
+            <h2 className="text-xl font-bold text-white flex items-center gap-2 flex-wrap">
+              Requerimiento Analítico y Dictamen IA Integral
               <span className="text-xs font-semibold px-2 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">
                 Metodología R-C-T-F
               </span>
             </h2>
             <p className="text-xs text-slate-400">
-              Formulación pericial Big 4 con consenso de Inteligencia Artificial
+              Análisis basado estrictamente en los datos reales suministrados para {entidadNombre}
             </p>
           </div>
         </div>
 
         <div className="hidden sm:flex items-center gap-2 text-xs text-slate-400 font-mono">
           <Cpu className="w-4 h-4 text-emerald-400" />
-          <span>Motor Activo: Gemini 3.8 Flash</span>
+          <span>Motor Activo: Gemini 4 Resiliente</span>
         </div>
       </div>
 
@@ -175,10 +217,10 @@ export const AnalysisSection: React.FC<Props> = ({
           </button>
 
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="text-xs font-bold text-white flex items-center gap-1.5">
                 {thresholds.notificacionesActivas ? (
-                  <Bell className="w-3.5 h-3.5 text-sky-400 animate-bounce" />
+                  <Bell className="w-3.5 h-3.5 text-sky-400" />
                 ) : (
                   <BellOff className="w-3.5 h-3.5 text-slate-500" />
                 )}
@@ -205,12 +247,11 @@ export const AnalysisSection: React.FC<Props> = ({
             </div>
 
             <p className="text-[11px] text-slate-400 mt-0.5">
-              Dispara alertas instantáneas cuando los datos violen los umbrales de fraude configurados
+              Evalúa contratos reales, ciclo de pagos y desviaciones Benford sobre los datos cargados
             </p>
           </div>
         </div>
 
-        {/* Right side: Threshold pills & settings button */}
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[11px] font-mono px-2.5 py-1 rounded bg-slate-900 border border-slate-700/80 text-sky-300">
             Adendas &gt; <strong>{thresholds.adendaMaxPct}%</strong>
@@ -230,10 +271,10 @@ export const AnalysisSection: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* Templates Selector */}
+      {/* Templates */}
       <div>
         <label className="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">
-          Plantillas de Investigación Pericial (Top Big 4)
+          Plantillas de Investigación Pericial
         </label>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
           {FORENSIC_TEMPLATES.map((tmpl) => (
@@ -247,9 +288,7 @@ export const AnalysisSection: React.FC<Props> = ({
                 <span>{tmpl.titulo}</span>
                 <ArrowRight className="w-3 h-3 text-slate-500 group-hover:text-sky-400 transition-colors" />
               </div>
-              <p className="text-[11px] text-slate-400 line-clamp-2 mt-1">
-                {tmpl.requerimiento}
-              </p>
+              <p className="text-[11px] text-slate-400 line-clamp-2 mt-1">{tmpl.requerimiento}</p>
             </button>
           ))}
         </div>
@@ -259,22 +298,19 @@ export const AnalysisSection: React.FC<Props> = ({
       <div>
         <div className="flex items-center justify-between mb-1.5">
           <label className="text-xs font-semibold uppercase tracking-wider text-slate-300">
-            Definición del Requerimiento Pericial
+            Definición del Requerimiento Pericial (Editable)
           </label>
-          <span className="text-[11px] text-slate-500 font-mono">
-            {requerimiento.length} caracteres
-          </span>
+          <span className="text-[11px] text-slate-500 font-mono">{requerimiento.length} caracteres</span>
         </div>
         <textarea
           rows={4}
           value={requerimiento}
           onChange={(e) => setRequerimiento(e.target.value)}
-          placeholder="Describa el objetivo forense. Ej: Analizar adendas contractuales superiores al 50% del monto original para detectar sobrecostos y fraccionamiento."
+          placeholder="Describa el objetivo forense real para esta entidad..."
           className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3.5 text-sm text-white focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 transition-colors leading-relaxed font-sans"
         />
       </div>
 
-      {/* Error Message */}
       {errorMsg && (
         <div className="bg-red-950/40 border border-red-800/50 p-3 rounded-lg text-xs text-red-200 flex items-center gap-2">
           <ShieldAlert className="w-4 h-4 text-red-400 shrink-0" />
@@ -282,7 +318,6 @@ export const AnalysisSection: React.FC<Props> = ({
         </div>
       )}
 
-      {/* Progress Bar (Animated) */}
       {loading && (
         <div className="space-y-2 bg-slate-950 border border-slate-800 p-4 rounded-lg">
           <div className="flex items-center justify-between text-xs">
@@ -301,7 +336,6 @@ export const AnalysisSection: React.FC<Props> = ({
         </div>
       )}
 
-      {/* Action Button */}
       <div>
         <button
           type="button"
@@ -314,7 +348,7 @@ export const AnalysisSection: React.FC<Props> = ({
           }`}
         >
           <Terminal className="w-4 h-4" />
-          {loading ? 'Procesando Consenso Forense IA...' : '🚀 Ejecutar Análisis Multimodelo IA'}
+          {loading ? 'Procesando Análisis y Mejoras con IA...' : '🚀 Ejecutar Análisis Forense Final y Generar Mejoras IA'}
         </button>
       </div>
     </section>
