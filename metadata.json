@@ -1,0 +1,7 @@
+{
+  "name": "Ecosistema de Auditoría Forense e Inteligencia de Datos",
+  "description": "Plataforma avanzada de auditoría forense digital con consenso multi-modelo IA, análisis de evidencias, detección de fraude y generación de informes técnicos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

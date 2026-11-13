@@ -1,0 +1,9 @@
+node_modules/
+build/
+dist/
+coverage/
+forensic_system_db/
+.DS_Store
+*.log
+.env*
+!.env.example
