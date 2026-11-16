@@ -16,23 +16,27 @@ import {
   Database,
   CreditCard,
   Lightbulb,
+  BookOpen,
+  History,
 } from 'lucide-react';
-import { CaseSession } from '../types/forensic';
+import { CaseSession, LegalReferenceItem } from '../types/forensic';
 import { formatCurrency } from '../utils/entities';
 
 interface Props {
   caseData: CaseSession | null;
   onClose: () => void;
   onLoadIntoWorkspace: (c: CaseSession) => void;
+  onOpenLegalViewer?: (ref: LegalReferenceItem) => void;
 }
 
 export const CaseScreenViewerModal: React.FC<Props> = ({
   caseData,
   onClose,
   onLoadIntoWorkspace,
+  onOpenLegalViewer,
 }) => {
   const [activeTab, setActiveTab] = useState<
-    'resumen' | 'documentos' | 'observaciones' | 'codigo' | 'trazabilidad'
+    'resumen' | 'documentos' | 'ccrd' | 'observaciones' | 'codigo' | 'trazabilidad'
   >('resumen');
 
   if (!caseData) return null;
@@ -43,6 +47,10 @@ export const CaseScreenViewerModal: React.FC<Props> = ({
   const payments = caseData.paymentCycleRows || [];
   const directorsList = caseData.directors || [];
   const contraReplicasList = caseData.contraReplicas || [];
+  const matrizLiteral = caseData.matrizHallazgosLiteral || [];
+  const legalLib = caseData.legalLibrary || [];
+  const dupList = caseData.duplicidades || [];
+  const iterationsList = caseData.iterations || [];
   const logs = caseData.traceabilityLogs || [];
 
   return (
@@ -110,9 +118,10 @@ export const CaseScreenViewerModal: React.FC<Props> = ({
           {[
             { id: 'resumen', label: '1. Ficha General, Dictamen & Mejoras' },
             { id: 'documentos', label: `2. Evidencia, Contratos (${contracts.length}) & Pagos (${payments.length})` },
-            { id: 'observaciones', label: `3. Observaciones (${obsList.length})` },
-            { id: 'codigo', label: '4. Algoritmo Python IA' },
-            { id: 'trazabilidad', label: `5. Trazabilidad (${logs.length})` },
+            { id: 'ccrd', label: `3. Matriz 3.01+ (${matrizLiteral.length}) & Leyes (${legalLib.length})` },
+            { id: 'observaciones', label: `4. Observaciones (${obsList.length})` },
+            { id: 'codigo', label: '5. Algoritmo Python' },
+            { id: 'trazabilidad', label: `6. Iteraciones (${iterationsList.length}) & Logs (${logs.length})` },
           ].map((tab) => (
             <button
               key={tab.id}
@@ -401,6 +410,91 @@ export const CaseScreenViewerModal: React.FC<Props> = ({
             </div>
           )}
 
+          {activeTab === 'ccrd' && (
+            <div className="space-y-5">
+              <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3">
+                <h3 className="text-sm font-bold text-emerald-300 flex items-center gap-2">
+                  <Scale className="w-4 h-4" />
+                  Matriz Literal CCRD (3.01+) &amp; Evaluación NOBACI ({matrizLiteral.length})
+                </h3>
+                {matrizLiteral.length === 0 ? (
+                  <p className="text-xs text-slate-400">No hay acápites 3.01+ extraídos todavía en este expediente.</p>
+                ) : (
+                  <div className="space-y-2.5">
+                    {matrizLiteral.map((h) => (
+                      <div key={h.id} className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs space-y-1.5">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <strong className="text-white">
+                            <span className="font-mono text-amber-300 mr-1.5">{h.idHallazgo}</span>
+                            {h.titulo}
+                          </strong>
+                          <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-sky-300">
+                            {h.estado} • {Number(h.puntaje0a10).toFixed(1)}/10
+                          </span>
+                        </div>
+                        <p className="text-slate-300">{h.condicionLiteral}</p>
+                        <p className="text-sky-300 text-[11px]">
+                          <strong>Criterio:</strong> {h.criterioTexto}
+                        </p>
+                        {h.recomendacionSupervisor && (
+                          <p className="text-emerald-300 text-[11px]">
+                            <strong>Análisis del Supervisor:</strong> {h.recomendacionSupervisor}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3">
+                <h3 className="text-sm font-bold text-sky-300 flex items-center gap-2">
+                  <BookOpen className="w-4 h-4" />
+                  Biblioteca Jurídica Virtual del Expediente ({legalLib.length})
+                </h3>
+                {legalLib.length === 0 ? (
+                  <p className="text-xs text-slate-400">No hay normas indexadas en la Biblioteca Legal de este caso.</p>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                    {legalLib.map((l) => (
+                      <div key={l.id} className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs space-y-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <strong className="text-white">#{l.jerarquiaOrden} • {l.numeroNorma}</strong>
+                          {onOpenLegalViewer && (
+                            <button
+                              type="button"
+                              onClick={() => onOpenLegalViewer(l)}
+                              className="px-2 py-0.5 bg-sky-600 hover:bg-sky-500 text-white rounded text-[10.5px] font-semibold cursor-pointer"
+                            >
+                              Leer Sin Salir
+                            </button>
+                          )}
+                        </div>
+                        <div className="text-slate-400">{l.titulo}</div>
+                        <div className="text-[10.5px] text-sky-300">
+                          Hallazgos: {(l.hallazgosVinculados || []).join(', ') || 'General'}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {dupList.length > 0 && (
+                <div className="bg-slate-900 border border-amber-500/30 rounded-xl p-5 space-y-2">
+                  <h3 className="text-sm font-bold text-amber-300">
+                    Duplicidades Detectadas ({dupList.length})
+                  </h3>
+                  {dupList.map((d) => (
+                    <div key={d.id} className="bg-slate-950 border border-slate-800 rounded p-2.5 text-xs text-slate-300">
+                      <strong className="text-amber-300">[{d.tipo} • {d.similitudPct}%]</strong> {d.descripcion}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           {activeTab === 'observaciones' && (
             <div className="space-y-3">
               {obsList.length === 0 ? (
@@ -442,7 +536,27 @@ export const CaseScreenViewerModal: React.FC<Props> = ({
           )}
 
           {activeTab === 'trazabilidad' && (
-            <div className="space-y-2.5">
+            <div className="space-y-4">
+              {iterationsList.length > 0 && (
+                <div className="bg-slate-900 border border-sky-500/30 rounded-xl p-4 space-y-2">
+                  <div className="text-xs font-bold text-sky-300 flex items-center gap-1.5">
+                    <History className="w-4 h-4" />
+                    Historial de Iteraciones del Expediente ({iterationsList.length})
+                  </div>
+                  <div className="space-y-1.5">
+                    {iterationsList.map((it) => (
+                      <div key={it.id} className="bg-slate-950 border border-slate-800 rounded p-2.5 text-[11px] flex items-center justify-between gap-2 flex-wrap">
+                        <div>
+                          <span className="font-mono font-bold text-emerald-400 mr-2">v{it.version}</span>
+                          <span className="text-slate-200">{it.resumenCambio}</span>
+                        </div>
+                        <span className="font-mono text-slate-400">{it.autor} • {it.timestamp.slice(0, 19).replace('T', ' ')}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {logs.length === 0 ? (
                 <div className="text-center py-8 text-xs text-slate-400">Sin eventos de trazabilidad registrados aún.</div>
               ) : (

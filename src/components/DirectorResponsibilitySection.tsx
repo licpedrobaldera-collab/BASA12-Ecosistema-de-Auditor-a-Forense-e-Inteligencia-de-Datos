@@ -24,6 +24,7 @@ import {
   DirectorResponsibility,
   DirectorSegregationSummary,
   DossierSectionItem,
+  LegalReferenceItem,
   ObservacionDecision,
   PaymentCycleRow,
 } from '../types/forensic';
@@ -44,6 +45,8 @@ interface Props {
   recursos: DossierSectionItem[];
   replicas: DossierSectionItem[];
   contraReplicas: DossierSectionItem[];
+  onAddDecreeToLegalLibrary?: (dir: DirectorResponsibility) => void;
+  onOpenLegalViewer?: (ref: LegalReferenceItem) => void;
   onLogAction: (accion: string, detalle: string) => void;
 }
 
@@ -78,6 +81,8 @@ export const DirectorResponsibilitySection: React.FC<Props> = ({
   recursos,
   replicas,
   contraReplicas,
+  onAddDecreeToLegalLibrary,
+  onOpenLegalViewer,
   onLogAction,
 }) => {
   const [searchDirectorQuery, setSearchDirectorQuery] = useState('');
@@ -360,9 +365,9 @@ export const DirectorResponsibilitySection: React.FC<Props> = ({
           </div>
           <div>
             <h2 className="text-lg sm:text-xl font-bold text-white flex items-center gap-2 flex-wrap">
-              Segregación de Responsabilidad por Directores y Decretos Oficiales
+              Buscador de Decretos Oficiales &amp; Segregación de Responsabilidad por Directores
               <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
-                Multi-Período + Búsqueda Online IA
+                Google Search + Fuentes Guardadas
               </span>
             </h2>
             <p className="text-xs text-slate-400">
@@ -622,13 +627,24 @@ export const DirectorResponsibilitySection: React.FC<Props> = ({
                         </span>
                       )}
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => removeDirector(dir.id)}
-                      className="text-red-400 hover:text-red-300 p-1 rounded hover:bg-red-950/40 cursor-pointer flex items-center gap-1 text-[11px]"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" /> Eliminar
-                    </button>
+                    <div className="flex items-center gap-2">
+                      {onAddDecreeToLegalLibrary && (
+                        <button
+                          type="button"
+                          onClick={() => onAddDecreeToLegalLibrary(dir)}
+                          className="text-sky-300 hover:text-sky-200 px-2 py-1 rounded bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/30 cursor-pointer flex items-center gap-1 text-[11px] font-semibold"
+                        >
+                          + Biblioteca Legal
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => removeDirector(dir.id)}
+                        className="text-red-400 hover:text-red-300 p-1 rounded hover:bg-red-950/40 cursor-pointer flex items-center gap-1 text-[11px]"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" /> Eliminar
+                      </button>
+                    </div>
                   </div>
 
                   {/* Editable Fields Grid */}
@@ -784,6 +800,30 @@ export const DirectorResponsibilitySection: React.FC<Props> = ({
                             >
                               {fetchingSourceUrl === src.url ? 'Leyendo...' : 'Ver Contenido Origen'}
                             </button>
+                            {onOpenLegalViewer && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onOpenLegalViewer({
+                                    id: `law-dec-${src.id}`,
+                                    numeroNorma: src.numeroDecreto || dir.numeroDecretoNombramiento || 'Decreto Oficial',
+                                    titulo: src.titulo || `Nombramiento ${dir.nombre}`,
+                                    jerarquia: 'DECRETO',
+                                    jerarquiaOrden: 4,
+                                    articulosPuntuales: ['Designación / Nombramiento'],
+                                    hallazgosVinculados: [],
+                                    url: src.url,
+                                    ubicacionFuente: src.ubicacionOrigen,
+                                    resumenAplicacion: src.extractoLiteral || `Decreto oficial correspondiente a ${dir.nombre}.`,
+                                    sha256: src.sha256,
+                                    fechaRegistro: src.fechaConsulta,
+                                  })
+                                }
+                                className="px-2 py-0.5 bg-sky-600/30 hover:bg-sky-600/50 text-sky-200 rounded text-[10px] cursor-pointer"
+                              >
+                                Visor Interno
+                              </button>
+                            )}
                           </div>
                         )}
                         {src.extractoLiteral && (

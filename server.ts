@@ -801,7 +801,11 @@ Devuelve JSON estricto:
 app.get('/api/cases', (req, res) => {
   const cases = readJsonDb<any[]>(CASES_DB_FILE, []);
   const entityId = typeof req.query.entityId === 'string' ? req.query.entityId : '';
-  const filtered = entityId ? cases.filter((c) => c.entity?.id === entityId) : cases;
+  const sessionOwnerId = typeof req.query.sessionOwnerId === 'string' ? req.query.sessionOwnerId : '';
+  let filtered = entityId ? cases.filter((c) => c.entity?.id === entityId) : cases;
+  if (sessionOwnerId) {
+    filtered = filtered.filter((c) => !c.sessionOwnerId || c.sessionOwnerId === sessionOwnerId);
+  }
   res.json({ success: true, cases: filtered });
 });
 
@@ -814,6 +818,27 @@ app.post('/api/cases', (req, res) => {
     const cases = readJsonDb<any[]>(CASES_DB_FILE, []);
     const now = new Date().toISOString();
     const idx = cases.findIndex((c) => c.id === incoming.id);
+    const existing = idx >= 0 ? cases[idx] : null;
+    const prevIterations = Array.isArray(incoming.iterations)
+      ? incoming.iterations
+      : Array.isArray(existing?.iterations)
+      ? existing.iterations
+      : [];
+    const nextVersion = prevIterations.length + 1;
+    const iterHash = crypto
+      .createHash('sha256')
+      .update(`${incoming.id || incoming.nombreCaso}_${nextVersion}_${now}`)
+      .digest('hex');
+
+    const newIteration = {
+      id: `iter-${Date.now()}`,
+      version: nextVersion,
+      timestamp: now,
+      autor: incoming.auditor?.nombre || 'Auditor Activo',
+      etapa: incoming.estado || 'EN_PROCESO',
+      resumenCambio: `Iteración v${nextVersion}: ${incoming.matrizHallazgosLiteral?.length || 0} hallazgos 3.01+, ${incoming.observaciones?.length || 0} obs., ${incoming.legalLibrary?.length || 0} normas.`,
+      sha256: iterHash,
+    };
 
     const record = {
       ...incoming,
@@ -823,6 +848,7 @@ app.post('/api/cases', (req, res) => {
         `CASO-${new Date().getFullYear()}-${String(cases.length + 1).padStart(3, '0')}`,
       updatedAt: now,
       timestamp: incoming.timestamp || now,
+      iterations: [newIteration, ...prevIterations].slice(0, 30),
     };
 
     if (idx >= 0) cases[idx] = record;
@@ -1931,6 +1957,642 @@ Devuelve JSON estricto:
       success: false,
       error: error.message || 'Error ejecutando la revisión previa interactiva.',
     });
+  }
+});
+
+// =========================================================================
+// NORMATIVE HIERARCHY & CCRD / NOBACI LITERAL 3.01+ EXTRACTOR
+// =========================================================================
+const HIERARCHY_ORDER: Record<string, number> = {
+  CONSTITUCION: 1,
+  TRATADOS_ISSAI_NIA: 2,
+  LEY: 3,
+  DECRETO: 4,
+  RESOLUCION_NOBACI: 5,
+  NORMATIVA_INTERNA: 6,
+};
+
+function inferHierarchy(text: string): { level: string; order: number } {
+  const low = String(text || '').toLowerCase();
+  if (low.includes('constituc')) return { level: 'CONSTITUCION', order: 1 };
+  if (low.includes('issai') || low.includes('nia ') || low.includes('isa ') || low.includes('tratado')) {
+    return { level: 'TRATADOS_ISSAI_NIA', order: 2 };
+  }
+  if (low.includes('ley')) return { level: 'LEY', order: 3 };
+  if (low.includes('decreto') || low.includes('reglamento')) return { level: 'DECRETO', order: 4 };
+  if (low.includes('nobaci') || low.includes('resoluc') || low.includes('adc-') || low.includes('cgr') || low.includes('dgcp')) {
+    return { level: 'RESOLUCION_NOBACI', order: 5 };
+  }
+  return { level: 'NORMATIVA_INTERNA', order: 6 };
+}
+
+function tokenizeForSimilarity(txt: string): Set<string> {
+  const stop = new Set(['para', 'sobre', 'como', 'entre', 'desde', 'hacia', 'conforme', 'segun', 'según', 'del', 'las', 'los', 'una', 'unos', 'unas', 'que', 'por', 'con', 'sin']);
+  const tokens = String(txt || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s.-]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length >= 4 && !stop.has(w));
+  return new Set(tokens);
+}
+
+function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let inter = 0;
+  a.forEach((t) => {
+    if (b.has(t)) inter++;
+  });
+  const union = a.size + b.size - inter;
+  return union > 0 ? inter / union : 0;
+}
+
+app.post('/api/forensic/extract-hallazgos-ccrd', async (req, res) => {
+  try {
+    const {
+      entityName = 'Entidad Auditada',
+      paisNormativa = 'República Dominicana',
+      periodo = { fechaDesde: '', fechaHasta: '' },
+      rawText = '',
+      informePreliminarText = '',
+      actaLecturaText = '',
+      recursosCount = 0,
+      replicasCount = 0,
+      contraReplicasCount = 0,
+      directors = [],
+    } = req.body;
+
+    const combinedText = [informePreliminarText, rawText].filter((s) => s && s.trim()).join('\n\n').trim();
+    if (!combinedText) {
+      return res.status(400).json({
+        success: false,
+        error: 'No hay texto documental cargado para extraer hallazgos literales (3.01 en adelante).',
+      });
+    }
+
+    // Programmatic extraction first: capture verbatim headings 3.01+, 3.1.xx, Hallazgo, Observación
+    const lines = combinedText.split(/\r?\n/);
+    const verbatimBlocks: { idCode: string; title: string; rawBlock: string }[] = [];
+    const headingRegex = /^\s*((?:3\.(?:0?\d+(?:\.\d+)*))|(?:hallazgo|observaci[oó]n)\s*(?:n[uú]m\.?|no\.?|#)?\s*\d+(?:\.\d+)*)\b[\s:.-]*(.*)$/i;
+
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(headingRegex);
+      if (m) {
+        const idCode = m[1].trim();
+        const titlePart = m[2].trim();
+        const snippetLines: string[] = [lines[i].trim()];
+        for (let j = i + 1; j < Math.min(lines.length, i + 18); j++) {
+          if (lines[j].match(headingRegex)) break;
+          if (lines[j].trim()) snippetLines.push(lines[j].trim());
+        }
+        verbatimBlocks.push({
+          idCode,
+          title: titlePart || `Acápite ${idCode}`,
+          rawBlock: snippetLines.join('\n'),
+        });
+      }
+    }
+
+    const ai = getAiClient();
+    let aiHallazgos: any[] = [];
+    let modelUsed = 'deterministic-parser';
+
+    if (ai) {
+      try {
+        const promptText = `
+[EXTRACCIÓN LITERAL DE HALLAZGOS 3.01 EN ADELANTE Y EVALUACIÓN DE SUPERVISIÓN CGR / CCRD / NOBACI]
+Entidad Auditada: ${entityName}
+Jurisdicción: ${paisNormativa}
+Período: ${periodo?.fechaDesde || 'N/D'} al ${periodo?.fechaHasta || 'N/D'}
+
+REGLA ESTRICTA DE INTEGRIDAD DOCUMENTAL:
+1. Extrae ÚNICAMENTE acápites/hallazgos que consten REALMENTE en el TEXTO SUMINISTRADO (priorizando numeración desde 3.01, 3.02, 3.1.01 hasta 3.8.01 en adelante; si el texto usa otra numeración real de hallazgos, respétala literalmente).
+2. NO inventes ni alteres hechos, cifras, fechas ni normas que no se desprendan del texto real.
+3. Redacta las recomendaciones en tono de SUPERVISOR / REVISOR TÉCNICO DE AUDITORÍA GUBERNAMENTAL (NO menciones "IA", "inteligencia artificial" ni "modelo" en ningún campo).
+4. Ordena el criterio de cada hallazgo conforme al Orden Jerárquico Normativo:
+   1 = CONSTITUCION, 2 = TRATADOS_ISSAI_NIA, 3 = LEY, 4 = DECRETO, 5 = RESOLUCION_NOBACI, 6 = NORMATIVA_INTERNA.
+5. Marco técnico aplicable para diagnóstico de brechas (cuando aplique al texto): Ley 18-24 (Arts. 10, 25 y 38 - CCRD), Ley 340-06 (Arts. 32 y 33), Ley 41-08 (Art. 8 num. 12 y Art. 50), Ley 311-14, Decreto 527-09 (Art. 3), Ley 498-06 (Arts. 24 y 25.d), Decreto 543-12 (Art. 31), Normas NOBACI 3 / NOBIS (ADC-3-006 nums. 4, 20, 33, 86; ADC-03-004.19; ADC-3-001.3; Activos Fijos), Ley 10-04 y Ley 64-00.
+
+${verbatimBlocks.length > 0 ? `BLOQUES PRE-DETECTADOS (3.01+):\n${JSON.stringify(verbatimBlocks.slice(0, 30), null, 2)}\n` : ''}
+
+[TEXTO REAL DEL EXPEDIENTE / INFORME]:
+${combinedText.slice(0, 36000)}
+
+Devuelve JSON estricto con esta estructura:
+{
+  "hallazgos": [
+    {
+      "idHallazgo": "3.1.01",
+      "titulo": "Título literal o exacto del acápite",
+      "condicionLiteral": "Extracto textual de lo que existe en el documento cargado sin alterar hechos.",
+      "criterioAuditorOriginal": "Criterio tal como aparece citado originalmente en el borrador/documento (si existe).",
+      "criterioTexto": "Cita textual normativa sugerida y artículos puntuales aplicables según jerarquía.",
+      "jerarquiaCriterio": "LEY | DECRETO | RESOLUCION_NOBACI | TRATADOS_ISSAI_NIA | CONSTITUCION | NORMATIVA_INTERNA",
+      "nivelRiesgo": "Alto (Crítico) | Medio (Moderado) | Bajo (Menor)",
+      "referenciaExacta": "Página, sección o documento origen exacto donde consta",
+      "causa": "Causa raíz identificada en el documento",
+      "efecto": "Impacto o riesgo institucional/financiero",
+      "estado": "Correcto / Cumple | Con Observación / Mejora",
+      "puntaje0a10": 7.5,
+      "recomendacionSupervisor": "Recomendación técnica del Supervisor/Revisor basada exclusivamente en el hallazgo real para lograr 10/10.",
+      "planAccionCorrectivo": "Pasos concretos de subsanación",
+      "responsableArea": "RR. HH. / Planificación / Compras / Almacén / Dirección Administrativa",
+      "entregable": "Manual, política o formulario requerido",
+      "leyesCitadas": [
+        { "norma": "Ley núm. 41-08", "articulo": "Art. 8, num. 12", "jerarquia": "LEY" }
+      ]
+    }
+  ]
+}
+`;
+        const resp = await callGeminiWithResilience(ai, {
+          contents: promptText,
+          config: { responseMimeType: 'application/json' },
+        });
+        const parsed = parseJsonSafe<any>(resp.response.text || '{}', { hallazgos: [] });
+        if (Array.isArray(parsed.hallazgos)) {
+          aiHallazgos = parsed.hallazgos;
+          modelUsed = resp.modelUsed;
+        }
+      } catch (aiErr) {
+        console.warn('extract-hallazgos-ccrd AI fallback to verbatim parser:', aiErr);
+      }
+    }
+
+    const rawSourceList = aiHallazgos.length > 0 ? aiHallazgos : verbatimBlocks.map((b) => {
+      const isObs = /debilidad|incumplimiento|ausencia|fuera de plazo|error|diferencia|sin\s+|vencid/i.test(b.rawBlock);
+      return {
+        idHallazgo: b.idCode,
+        titulo: b.title,
+        condicionLiteral: b.rawBlock,
+        criterioAuditorOriginal: 'Verificado en texto original cargado',
+        criterioTexto: 'Verificar artículo puntual aplicable en el Orden Jerárquico Normativo.',
+        jerarquiaCriterio: inferHierarchy(b.rawBlock).level,
+        nivelRiesgo: isObs ? 'Alto (Crítico)' : 'Bajo (Menor)',
+        referenciaExacta: `Acápite ${b.idCode}`,
+        causa: 'Pendiente de determinación detallada en campo.',
+        efecto: 'Exposición operativa o de cumplimiento normativo.',
+        estado: isObs ? 'Con Observación / Mejora' : 'Correcto / Cumple',
+        puntaje0a10: isObs ? 6.5 : 10,
+        recomendacionSupervisor: 'Validar evidencia soporte y documentar plan correctivo conforme a NOBACI y Ley núm. 18-24.',
+        planAccionCorrectivo: 'Subsanar brecha documental y actualizar registros institucionales.',
+        responsableArea: 'Área Auditada Responsable',
+        entregable: 'Informe de cumplimiento y soporte documental',
+        leyesCitadas: [],
+      };
+    });
+
+    // If still empty (no 3.xx pattern in doc), extract paragraph blocks literally so nothing is invented
+    const fallbackParagraphs =
+      rawSourceList.length === 0
+        ? combinedText
+            .split(/\n{2,}/)
+            .filter((p) => p.trim().length > 40)
+            .slice(0, 16)
+            .map((p, idx) => {
+              const isObs = /debilidad|incumplimiento|ausencia|fuera de plazo|error|diferencia|observa/i.test(p);
+              return {
+                idHallazgo: `3.${String(idx + 1).padStart(2, '0')}`,
+                titulo: p.trim().split(/\n/)[0].slice(0, 90),
+                condicionLiteral: p.trim().slice(0, 1200),
+                criterioAuditorOriginal: 'Texto literal del documento',
+                criterioTexto: 'Ley núm. 18-24 y Normas NOBACI aplicables al acápite.',
+                jerarquiaCriterio: inferHierarchy(p).level,
+                nivelRiesgo: isObs ? 'Medio (Moderado)' : 'Bajo (Menor)',
+                referenciaExacta: `Bloque textual #${idx + 1}`,
+                causa: 'Según texto real suministrado.',
+                efecto: 'Impacto sujeto a validación de supervisión.',
+                estado: isObs ? 'Con Observación / Mejora' : 'Correcto / Cumple',
+                puntaje0a10: isObs ? 7.0 : 9.5,
+                recomendacionSupervisor: 'Verificar correspondencia con la documentación fuente y sustentar criterio normativo.',
+                planAccionCorrectivo: 'Alinear proceso con manuales de control interno NOBACI.',
+                responsableArea: 'Dirección Administrativa / Área Técnica',
+                entregable: 'Evidencia de verificación',
+                leyesCitadas: [],
+              };
+            })
+        : rawSourceList;
+
+    const normalized = fallbackParagraphs.map((h: any, idx: number) => {
+      const hLevel = String(h.jerarquiaCriterio || 'LEY').toUpperCase();
+      const order = HIERARCHY_ORDER[hLevel] || 3;
+      const validRiesgo = ['Alto (Crítico)', 'Medio (Moderado)', 'Bajo (Menor)'].includes(h.nivelRiesgo)
+        ? h.nivelRiesgo
+        : h.estado === 'Correcto / Cumple'
+        ? 'Bajo (Menor)'
+        : 'Medio (Moderado)';
+      return {
+        id: `hz-lit-${Date.now()}-${idx}`,
+        idHallazgo: String(h.idHallazgo || `3.${String(idx + 1).padStart(2, '0')}`),
+        titulo: String(h.titulo || `Hallazgo ${idx + 1}`),
+        condicionLiteral: String(h.condicionLiteral || ''),
+        criterioAuditorOriginal: String(h.criterioAuditorOriginal || ''),
+        criterioTexto: String(h.criterioTexto || ''),
+        jerarquiaCriterio: (HIERARCHY_ORDER[hLevel] ? hLevel : 'LEY') as any,
+        jerarquiaOrden: order,
+        nivelRiesgo: validRiesgo,
+        referenciaExacta: String(h.referenciaExacta || (informePreliminarText ? 'Informe Preliminar' : 'Documento Cargado')),
+        causa: String(h.causa || ''),
+        efecto: String(h.efecto || ''),
+        estado: h.estado === 'Correcto / Cumple' ? 'Correcto / Cumple' : 'Con Observación / Mejora',
+        puntaje0a10: Math.max(0, Math.min(10, Number(h.puntaje0a10) || 7.0)),
+        recomendacionSupervisor: String(h.recomendacionSupervisor || ''),
+        planAccionCorrectivo: String(h.planAccionCorrectivo || ''),
+        responsableArea: String(h.responsableArea || ''),
+        entregable: String(h.entregable || ''),
+        leyesCitadas: Array.isArray(h.leyesCitadas) ? h.leyesCitadas : [],
+        origenDocumento: informePreliminarText ? 'Informe Preliminar / Documento Cargado' : 'Evidencia Digital',
+      };
+    });
+
+    // Dynamic 4-stage CCRD Guía evaluation (Ley núm. 18-24)
+    const hasDocs = combinedText.length > 50;
+    const hasActa = actaLecturaText.trim().length > 20;
+    const hasContradiccion = recursosCount + replicasCount + contraReplicasCount > 0;
+    const ccrdStages = [
+      {
+        step: 1,
+        title: 'Planificación y Análisis',
+        description: 'Recepción de credenciales, análisis preliminar, identificación de titulares (decretos) y evaluación de riesgos/controles NOBACI.',
+        keyActions: ['Acreditación del equipo', 'Revisión marco legal jerárquico', 'Identificación de directores por período'],
+        status: hasDocs ? 'Completado' : 'En Proceso',
+        evidenciaVerificada: `${directors.length} director(es) registrados; ${combinedText.length} caracteres de expediente procesados.`,
+      },
+      {
+        step: 2,
+        title: 'Ejecución',
+        description: 'Aplicación de pruebas sustantivas y de cumplimiento sobre contrataciones, ciclo de pagos, RR. HH. e inventarios.',
+        keyActions: ['Extracción literal 3.01+', 'Pruebas de cumplimiento NOBACI', 'Detección de duplicidades'],
+        status: normalized.length > 0 ? 'Completado' : hasDocs ? 'En Proceso' : 'Pendiente',
+        evidenciaVerificada: `${normalized.length} acápite(s)/hallazgo(s) extraídos literalmente.`,
+      },
+      {
+        step: 3,
+        title: 'Comunicación de Hallazgos',
+        description: 'Lectura de hallazgos y concesión de plazos para recursos, réplicas y contra-réplicas bajo el debido proceso.',
+        keyActions: ['Acta de Lectura', 'Recepción de Recursos y Réplicas', 'Ponderación de Contra-Réplicas'],
+        status: hasActa && hasContradiccion ? 'Completado' : hasActa || hasContradiccion ? 'En Proceso' : 'Pendiente',
+        evidenciaVerificada: `Acta: ${hasActa ? 'Cargada' : 'Pendiente'} | Recursos: ${recursosCount} | Réplicas: ${replicasCount} | Contra-Réplicas: ${contraReplicasCount}.`,
+      },
+      {
+        step: 4,
+        title: 'Conclusión e Informe Final',
+        description: 'Consolidación de dictamen del Supervisor/Revisor, recomendaciones correctivas y matriz aprobada para remisión oficial.',
+        keyActions: ['Revisión previa QA', 'Cierre de hallazgos', 'Emisión Word/Excel oficial'],
+        status: normalized.length > 0 && hasContradiccion ? 'En Proceso' : 'Pendiente',
+        evidenciaVerificada: 'Listo para revisión previa y emisión de Informe del Supervisor.',
+      },
+    ];
+
+    res.json({
+      success: true,
+      modelUsed,
+      hallazgos: normalized,
+      ccrdStages,
+      totalExtraidos: normalized.length,
+    });
+  } catch (error: any) {
+    console.error('Error in /api/forensic/extract-hallazgos-ccrd:', error);
+    res.status(500).json({ success: false, error: error.message || 'Error extrayendo hallazgos literales 3.01+.' });
+  }
+});
+
+// =========================================================================
+// SENIOR CGR / NOBACI / LEY 41-08 / MAP / DGCP EVALUATOR
+// =========================================================================
+app.post('/api/forensic/evaluate-nobaci-hallazgo', async (req, res) => {
+  try {
+    const ai = getAiClient();
+    if (!ai) {
+      return res.status(503).json({ success: false, error: 'Servicio de análisis no disponible en el servidor.' });
+    }
+
+    const { situacion = '', idHallazgo = '3.01', entityName = 'Entidad Pública', periodo = '' } = req.body;
+    if (!situacion.trim()) {
+      return res.status(400).json({ success: false, error: 'Debe describir la situación o hallazgo real a evaluar.' });
+    }
+
+    const promptText = `
+Actúa como un Auditor Gubernamental Senior y Consultor en Administración Pública de la República Dominicana, experto en las Normas Básicas de Control Interno (NOBACI) de la Contraloría General de la República (CGR), la Ley 41-08 de Función Pública y normativas del MAP y la DGCP.
+Redacta exclusivamente desde la perspectiva del Supervisor / Revisor Técnico (NUNCA menciones "IA", "inteligencia artificial" ni "Gemini").
+
+Entidad: ${entityName} | Período: ${periodo || 'Ejercicio Fiscal'} | Código: ${idHallazgo}
+
+Marco Normativo Dominicano Obligatorio (respetando Orden Jerárquico: Constitución -> Tratados/ISSAI -> Leyes -> Decretos -> Resoluciones/NOBACI -> Manuales):
+1. Ley 41-08 (Art. 8, num. 12) y Decreto 527-09 (Art. 3) sobre estructuras organizativas, manuales de procedimientos y cargos.
+2. Ley 498-06 (Arts. 24 y 25.d) sobre Planificación Estratégica Institucional (PEI).
+3. Decreto 543-12 (Art. 31) sobre Planes Anuales de Compras y Contrataciones (PACC).
+4. Normas NOBACI 3: ADC-3-006 (nums. 4, 20, 33 y 86 para Recursos Humanos), ADC-03-004.19 (Compras) y ADC-3-001.3 (Inventarios).
+
+Situación o hallazgo real a evaluar:
+"${situacion}"
+
+Devuelve JSON estricto:
+{
+  "diagnosticoBrechas": "Normas específicas incumplidas en orden jerárquico y riesgo institucional asociado.",
+  "condicionLiteral": "Redacción objetiva del hecho detectado basada estrictamente en la situación descrita.",
+  "criterioTexto": "Cita textual y jerárquica de los artículos aplicables (Ley, Decreto, NOBACI).",
+  "jerarquiaCriterio": "LEY | DECRETO | RESOLUCION_NOBACI | NORMATIVA_INTERNA",
+  "causa": "Causa administrativa/operativa subyacente.",
+  "efecto": "Consecuencia o impacto institucional/patrimonial.",
+  "recomendacionSupervisor": "Recomendación técnica de supervisión para subsanar el hallazgo.",
+  "planAccionCorrectivo": "Pasos concretos enumerados para lograr aprobación del MAP y la CGR.",
+  "responsableArea": "RR. HH. | Planificación | Compras | Almacén | Dirección General",
+  "entregable": "Manuales, políticas o formularios específicos requeridos",
+  "leyesCitadas": [
+    { "norma": "Nombre oficial de la norma", "articulo": "Artículo o numeral exacto", "jerarquia": "LEY | DECRETO | RESOLUCION_NOBACI" }
+  ]
+}
+`;
+
+    const { response, modelUsed } = await callGeminiWithResilience(ai, {
+      contents: promptText,
+      config: { responseMimeType: 'application/json' },
+    });
+
+    const parsed = parseJsonSafe<any>(response.text || '{}', {});
+    res.json({ success: true, modelUsed, data: parsed });
+  } catch (error: any) {
+    console.error('Error in /api/forensic/evaluate-nobaci-hallazgo:', error);
+    res.status(500).json({ success: false, error: error.message || 'Error evaluando hallazgo bajo marco NOBACI/CGR.' });
+  }
+});
+
+// =========================================================================
+// DUPLICATE DETECTOR ACROSS FINDINGS, LAWS, CONTRACTS & PAYMENTS
+// =========================================================================
+app.post('/api/forensic/detect-duplicates', async (req, res) => {
+  try {
+    const {
+      hallazgos = [],
+      observaciones = [],
+      legalLibrary = [],
+      contractRows = [],
+      paymentCycleRows = [],
+    } = req.body;
+
+    const duplicates: any[] = [];
+
+    // 1. Hallazgos & Observaciones similarity check
+    const combinedItems = [
+      ...hallazgos.map((h: any) => ({ id: h.id, code: h.idHallazgo, label: `${h.idHallazgo} ${h.titulo}`, text: `${h.titulo} ${h.condicionLiteral}` })),
+      ...observaciones.map((o: any) => ({ id: o.id, code: o.codigoObservacion, label: `${o.codigoObservacion} ${o.titulo}`, text: `${o.titulo} ${o.descripcionPreliminar}` })),
+    ];
+
+    for (let i = 0; i < combinedItems.length; i++) {
+      const tokA = tokenizeForSimilarity(combinedItems[i].text);
+      for (let j = i + 1; j < combinedItems.length; j++) {
+        const tokB = tokenizeForSimilarity(combinedItems[j].text);
+        const sim = jaccardSimilarity(tokA, tokB);
+        if (sim >= 0.48 || (combinedItems[i].code && combinedItems[i].code === combinedItems[j].code)) {
+          duplicates.push({
+            id: `dup-h-${i}-${j}-${Date.now()}`,
+            tipo: 'HALLAZGO',
+            elementosInvolucrados: [combinedItems[i].label, combinedItems[j].label],
+            similitudPct: Math.round(Math.max(sim, combinedItems[i].code === combinedItems[j].code ? 0.95 : sim) * 100),
+            descripcion: `Posible duplicidad o solapamiento sustantivo entre "${combinedItems[i].label}" y "${combinedItems[j].label}".`,
+            recomendacionMejora: 'Consolidar en un único acápite con evidencia unificada o diferenciar expresamente el período/área evaluada para evitar doble imputación.',
+            incluidoEnObservaciones: false,
+          });
+        }
+      }
+    }
+
+    // 2. Legal citations duplicity check
+    for (let i = 0; i < legalLibrary.length; i++) {
+      const normA = String(legalLibrary[i].numeroNorma || legalLibrary[i].titulo || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      for (let j = i + 1; j < legalLibrary.length; j++) {
+        const normB = String(legalLibrary[j].numeroNorma || legalLibrary[j].titulo || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (normA && normB && (normA === normB || normA.includes(normB) || normB.includes(normA))) {
+          duplicates.push({
+            id: `dup-l-${i}-${j}-${Date.now()}`,
+            tipo: 'LEY_CITA',
+            elementosInvolucrados: [legalLibrary[i].titulo || legalLibrary[i].numeroNorma, legalLibrary[j].titulo || legalLibrary[j].numeroNorma],
+            similitudPct: 92,
+            descripcion: `Cita normativa duplicada en la Biblioteca Legal del caso: "${legalLibrary[i].numeroNorma}" vs "${legalLibrary[j].numeroNorma}".`,
+            recomendacionMejora: 'Unificar bajo una sola ficha normativa jerárquica vinculando todos sus artículos puntuales.',
+            incluidoEnObservaciones: false,
+          });
+        }
+      }
+    }
+
+    // 3. Payment e-CF / Libramiento / Contract duplicity check
+    const seenEcf = new Map<string, any>();
+    paymentCycleRows.forEach((p: any) => {
+      const key = String(p.numeroFacturaEcf || '').trim().toUpperCase();
+      if (key && key !== 'N/D') {
+        if (seenEcf.has(key)) {
+          const prev = seenEcf.get(key);
+          duplicates.push({
+            id: `dup-p-${p.id}-${Date.now()}`,
+            tipo: 'CONTRATO_PAGO',
+            elementosInvolucrados: [`Orden ${prev.ordenNumero} (${prev.beneficiario})`, `Orden ${p.ordenNumero} (${p.beneficiario})`],
+            similitudPct: 100,
+            descripcion: `Comprobante fiscal (e-CF/Factura) "${key}" repetido en dos registros del Ciclo de Pagos.`,
+            recomendacionMejora: 'Verificar inmediatamente posible doble pago o error de imputación contable e incluir como observación crítica.',
+            incluidoEnObservaciones: false,
+          });
+        } else {
+          seenEcf.set(key, p);
+        }
+      }
+    });
+
+    const seenContracts = new Map<string, any>();
+    contractRows.forEach((c: any) => {
+      const key = String(c.contratoId || '').trim().toUpperCase();
+      if (key && seenContracts.has(key)) {
+        const prev = seenContracts.get(key);
+        duplicates.push({
+          id: `dup-c-${c.id}-${Date.now()}`,
+          tipo: 'CONTRATO_PAGO',
+          elementosInvolucrados: [`${prev.contratoId} (${prev.proveedor})`, `${c.contratoId} (${c.proveedor})`],
+          similitudPct: 100,
+          descripcion: `Código de contrato "${key}" registrado múltiples veces en la matriz.`,
+          recomendacionMejora: 'Consolidar adendas en el registro matriz original o diferenciar sufijos de modificación.',
+          incluidoEnObservaciones: false,
+        });
+      } else if (key) {
+        seenContracts.set(key, c);
+      }
+    });
+
+    res.json({
+      success: true,
+      duplicates,
+      totalDuplicates: duplicates.length,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message || 'Error detectando duplicidades.' });
+  }
+});
+
+// =========================================================================
+// VIRTUAL LEGAL LIBRARY BUILDER (Laws, Decrees & Regulations linked to Findings)
+// =========================================================================
+app.post('/api/forensic/build-legal-library', async (req, res) => {
+  try {
+    const {
+      paisNormativa = 'República Dominicana',
+      hallazgos = [],
+      observaciones = [],
+      directors = [],
+      rawText = '',
+    } = req.body;
+
+    // 1. Collect citations programmatically from hallazgos, directors, and text
+    const textPool = [
+      rawText.slice(0, 20000),
+      ...hallazgos.map((h: any) => `${h.idHallazgo}: ${h.criterioTexto} ${h.condicionLiteral}`),
+      ...observaciones.map((o: any) => `${o.codigoObservacion}: ${o.fundamentacionLegal}`),
+      ...directors.map((d: any) => `Decreto ${d.numeroDecretoNombramiento}`),
+    ].join('\n');
+
+    const normaRegex = /(?:Ley(?:\s+n[uú]m\.?|\s+No\.?)?\s*\d{1,4}-\d{2,4}|Decreto(?:\s+n[uú]m\.?|\s+No\.?)?\s*\d{1,4}-\d{2,4}|NOBACI(?:\s*3)?(?:\s*ADC-[\d.-]+)?|Resoluci[oó]n\s*(?:n[uú]m\.?|No\.?)?\s*[\d/-]+|Constituci[oó]n(?:\s+de\s+la\s+Rep[uú]blica)?|NIA\s*\d+|ISSAI\s*\d+)/gi;
+    const foundNormsSet = new Set<string>();
+    const matches = textPool.match(normaRegex) || [];
+    matches.forEach((m) => foundNormsSet.add(m.replace(/\s+/g, ' ').trim()));
+
+    const ai = getAiClient();
+    const nowIso = new Date().toISOString();
+    let structuredNorms: any[] = [];
+    let webSources: any[] = [];
+
+    if (ai && (foundNormsSet.size > 0 || hallazgos.length > 0)) {
+      const promptText = `
+[CONSTRUCCIÓN DE BIBLIOTECA JURÍDICA VIRTUAL Y VINCULACIÓN CON HALLAZGOS]
+País / Jurisdicción: ${paisNormativa}
+Normas detectadas inicialmente: ${Array.from(foundNormsSet).slice(0, 25).join(', ') || 'Analizar del texto'}
+
+Hallazgos del caso:
+${JSON.stringify(hallazgos.slice(0, 25).map((h: any) => ({ idHallazgo: h.idHallazgo, titulo: h.titulo, criterio: h.criterioTexto, leyesCitadas: h.leyesCitadas })), null, 2)}
+
+Decretos de Directores:
+${JSON.stringify(directors.map((d: any) => ({ nombre: d.nombre, decreto: d.numeroDecretoNombramiento, fuentes: d.fuentes })), null, 2)}
+
+Usa la búsqueda web oficial si está disponible para encontrar enlaces URL oficiales reales (Consultoría Jurídica del Poder Ejecutivo, Congreso, CGR, DGCP, MAP, Portal Oficial) de cada Ley, Decreto, Reglamento o Norma NOBACI citada, y vincula cada norma a los IDs exactos de hallazgos (ej. "3.01", "3.1.02") y artículos puntuales.
+NO inventes URLs ni números de normas.
+Orden jerárquico: 1=CONSTITUCION, 2=TRATADOS_ISSAI_NIA, 3=LEY, 4=DECRETO, 5=RESOLUCION_NOBACI, 6=NORMATIVA_INTERNA.
+
+Devuelve JSON dentro de \`\`\`json ... \`\`\`:
+\`\`\`json
+{
+  "normas": [
+    {
+      "numeroNorma": "Ley núm. 18-24",
+      "titulo": "Ley de la Cámara de Cuentas de la República Dominicana",
+      "jerarquia": "LEY",
+      "articulosPuntuales": ["Art. 36", "Art. 42"],
+      "hallazgosVinculados": ["3.01", "3.02"],
+      "url": "https://...",
+      "ubicacionFuente": "Consultoría Jurídica del Poder Ejecutivo / Congreso Nacional",
+      "resumenAplicacion": "Breve explicación técnica de su aplicación a los hallazgos vinculados."
+    }
+  ]
+}
+\`\`\`
+`;
+
+      try {
+        const gResp = await callGeminiWithResilience(ai, {
+          contents: promptText,
+          config: { tools: [{ googleSearch: {} }] },
+        });
+        const parsed = parseJsonSafe<any>(gResp.response.text || '{}', { normas: [] });
+        structuredNorms = Array.isArray(parsed.normas) ? parsed.normas : [];
+        const chunks = gResp.response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+        webSources = chunks.filter((c: any) => c?.web?.uri).map((c: any) => ({
+          url: String(c.web.uri),
+          titulo: String(c.web.title || ''),
+        }));
+      } catch (searchErr) {
+        // Fallback: run without search tool, and attach any official public search fallback URL
+        try {
+          const fallbackAi = await callGeminiWithResilience(ai, {
+            contents: promptText,
+            config: { responseMimeType: 'application/json' },
+          });
+          const parsed = parseJsonSafe<any>(fallbackAi.response.text || '{}', { normas: [] });
+          structuredNorms = Array.isArray(parsed.normas) ? parsed.normas : [];
+        } catch {}
+      }
+    }
+
+    // Ensure every programmatically found norm or director decree is represented cleanly
+    if (structuredNorms.length === 0) {
+      Array.from(foundNormsSet).forEach((norm) => {
+        const inf = inferHierarchy(norm);
+        const linkedIds = hallazgos
+          .filter((h: any) => `${h.criterioTexto} ${h.condicionLiteral}`.toLowerCase().includes(norm.toLowerCase()))
+          .map((h: any) => h.idHallazgo);
+        structuredNorms.push({
+          numeroNorma: norm,
+          titulo: norm,
+          jerarquia: inf.level,
+          articulosPuntuales: ['Por especificar'],
+          hallazgosVinculados: linkedIds,
+          url: '',
+          ubicacionFuente: 'Citada en el expediente cargado',
+          resumenAplicacion: `Referencia normativa vinculada en ${linkedIds.join(', ') || 'el expediente'}.`,
+        });
+      });
+    }
+
+    // Deduplicate check & finalize sorted by Hierarchy Order
+    const seenKeys = new Map<string, number>();
+    const library = structuredNorms
+      .map((n: any, idx: number) => {
+        const level = HIERARCHY_ORDER[String(n.jerarquia || '').toUpperCase()]
+          ? String(n.jerarquia).toUpperCase()
+          : inferHierarchy(n.numeroNorma || n.titulo).level;
+        const order = HIERARCHY_ORDER[level] || 3;
+        const normKey = String(n.numeroNorma || n.titulo || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const prevCount = seenKeys.get(normKey) || 0;
+        seenKeys.set(normKey, prevCount + 1);
+
+        // Try matching a grounded web source URL if the entry doesn't have one
+        const groundedMatch =
+          !n.url && webSources.find((ws) => ws.titulo.toLowerCase().includes(String(n.numeroNorma || '').toLowerCase()));
+        const finalUrl = n.url && /^https?:\/\//i.test(n.url)
+          ? n.url
+          : groundedMatch?.url || '';
+
+        const sha256 = crypto
+          .createHash('sha256')
+          .update(`${n.numeroNorma}_${finalUrl}_${nowIso}_${idx}`)
+          .digest('hex');
+
+        return {
+          id: `law-${Date.now()}-${idx}`,
+          numeroNorma: String(n.numeroNorma || n.titulo || `Norma ${idx + 1}`),
+          titulo: String(n.titulo || n.numeroNorma || 'Referencia Normativa'),
+          jerarquia: level,
+          jerarquiaOrden: order,
+          articulosPuntuales: Array.isArray(n.articulosPuntuales) ? n.articulosPuntuales : [],
+          hallazgosVinculados: Array.isArray(n.hallazgosVinculados) ? n.hallazgosVinculados : [],
+          url: finalUrl,
+          ubicacionFuente: String(n.ubicacionFuente || (finalUrl ? 'Portal Web Oficial' : 'Expediente Auditado')),
+          resumenAplicacion: String(n.resumenAplicacion || ''),
+          esDuplicado: prevCount > 0,
+          detalleDuplicidad: prevCount > 0 ? 'Norma citada múltiples veces en la biblioteca.' : '',
+          sha256,
+          fechaRegistro: nowIso,
+        };
+      })
+      .sort((a, b) => a.jerarquiaOrden - b.jerarquiaOrden);
+
+    res.json({
+      success: true,
+      library,
+      totalNormas: library.length,
+      timestamp: nowIso,
+    });
+  } catch (error: any) {
+    console.error('Error in /api/forensic/build-legal-library:', error);
+    res.status(500).json({ success: false, error: error.message || 'Error construyendo la Biblioteca Virtual Legal.' });
   }
 });
 

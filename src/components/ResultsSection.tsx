@@ -10,18 +10,25 @@ import {
   Play,
   CheckCircle2,
   Lightbulb,
+  BookOpen,
+  FileCheck2,
 } from 'lucide-react';
 import {
+  AuditedEntity,
   AuditorProfile,
   AuditPeriodScope,
+  CcrdStageStatus,
   ContractEvidenceRow,
   DirectorResponsibility,
   DossierSectionItem,
+  DuplicityFinding,
   ForensicAnalysisResult,
+  HallazgoMatrizLiteral,
+  LegalReferenceItem,
   ObservacionDecision,
   PaymentCycleRow,
 } from '../types/forensic';
-import { downloadWordReport } from '../utils/exportWord';
+import { downloadSupervisorWordReport, downloadWordReport } from '../utils/exportWord';
 import { formatCurrency } from '../utils/entities';
 
 interface Props {
@@ -42,6 +49,12 @@ interface Props {
   replicas?: DossierSectionItem[];
   contraReplicas?: DossierSectionItem[];
   directors?: DirectorResponsibility[];
+  entity?: AuditedEntity | null;
+  hallazgosLiteral?: HallazgoMatrizLiteral[];
+  duplicidades?: DuplicityFinding[];
+  legalLibrary?: LegalReferenceItem[];
+  ccrdStages?: CcrdStageStatus[];
+  onOpenLegalViewer?: (ref: LegalReferenceItem) => void;
 }
 
 export const ResultsSection: React.FC<Props> = ({
@@ -62,6 +75,12 @@ export const ResultsSection: React.FC<Props> = ({
   replicas,
   contraReplicas,
   directors,
+  entity,
+  hallazgosLiteral = [],
+  duplicidades = [],
+  legalLibrary = [],
+  ccrdStages = [],
+  onOpenLegalViewer,
 }) => {
   const [copiedCode, setCopiedCode] = useState(false);
   const [sandboxExecuted, setSandboxExecuted] = useState(false);
@@ -112,7 +131,7 @@ export const ResultsSection: React.FC<Props> = ({
           </div>
         </div>
 
-        <div>
+        <div className="flex flex-wrap gap-2">
           <button
             onClick={() =>
               downloadWordReport({
@@ -132,12 +151,37 @@ export const ResultsSection: React.FC<Props> = ({
                 replicas,
                 contraReplicas,
                 directors,
+                legalLibrary,
               })
             }
             className="w-full sm:w-auto px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/40 transition-all cursor-pointer"
           >
             <Download className="w-4 h-4" />
             Descargar Informe Técnico (.doc)
+          </button>
+
+          <button
+            onClick={() =>
+              downloadSupervisorWordReport({
+                nombreCaso,
+                entity,
+                auditor,
+                periodo,
+                paisNormativa,
+                selloDigital: resultado.digitalHash,
+                hallazgos: hallazgosLiteral,
+                duplicidades,
+                legalLibrary,
+                ccrdStages,
+                directors,
+                paymentCycleRows,
+              })
+            }
+            className="w-full sm:w-auto px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-2 shadow-lg transition-all cursor-pointer"
+            title="Informe oficial del Supervisor / Revisor Técnico sin menciones a IA"
+          >
+            <FileCheck2 className="w-4 h-4" />
+            Informe Supervisor CCRD (.doc)
           </button>
         </div>
       </div>
@@ -313,12 +357,30 @@ export const ResultsSection: React.FC<Props> = ({
       )}
 
       {/* Fundamento Legal */}
-      <div className="bg-slate-950 border border-slate-800 p-4 rounded-lg space-y-1.5">
+      <div className="bg-slate-950 border border-slate-800 p-4 rounded-lg space-y-2.5">
         <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
           <Scale className="w-3.5 h-3.5 text-sky-400" />
           Fundamentación Normativa y Legal
         </h4>
         <p className="text-xs text-slate-300 leading-relaxed">{resultado.fundamentoLegal}</p>
+        {onOpenLegalViewer && legalLibrary.length > 0 && (
+          <div className="pt-2 border-t border-slate-800/80 flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] text-slate-400 font-semibold flex items-center gap-1 mr-1">
+              <BookOpen className="w-3.5 h-3.5 text-sky-400" />
+              Leer Leyes Citadas (Sin Salir del Informe):
+            </span>
+            {legalLibrary.map((law) => (
+              <button
+                key={law.id}
+                type="button"
+                onClick={() => onOpenLegalViewer(law)}
+                className="px-2.5 py-1 rounded-md bg-sky-500/15 hover:bg-sky-500/30 border border-sky-500/30 text-sky-300 text-[11px] font-semibold cursor-pointer"
+              >
+                #{law.jerarquiaOrden} • {law.numeroNorma}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </section>
   );

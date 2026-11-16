@@ -39,15 +39,23 @@ import { PaymentCycleSection } from './components/PaymentCycleSection';
 import { AiStepCoach } from './components/AiStepCoach';
 import { DirectorResponsibilitySection } from './components/DirectorResponsibilitySection';
 import { InteractivePreReviewRunnerSection } from './components/InteractivePreReviewRunnerSection';
+import { CcrdNobaciMatrixSection } from './components/CcrdNobaciMatrixSection';
+import { LegalLibrarySection } from './components/LegalLibrarySection';
+import { LegalDocumentViewerModal } from './components/LegalDocumentViewerModal';
 import {
   AuditedEntity,
+  CaseIteration,
   CaseSession,
+  CcrdStageStatus,
   ContractEvidenceRow,
   DirectorResponsibility,
+  DuplicityFinding,
   EvidenceFile,
   ForensicAnalysisResult,
   ForensicThresholds,
+  HallazgoMatrizLiteral,
   InteractivePreReviewReport,
+  LegalReferenceItem,
   PreReviewDocType,
   RealtimeAlert,
   AuditorProfile,
@@ -179,8 +187,22 @@ export default function App() {
   const [directors, setDirectors] = useState<DirectorResponsibility[]>([]);
   const [preReviewReports, setPreReviewReports] = useState<Partial<Record<PreReviewDocType, InteractivePreReviewReport>>>({});
 
-  // Real Observations, Evidence, Contracts, Payment Cycle, Traceability & Final Result (Clean)
+  // Multi-user session isolation ID
+  const [sessionOwnerId] = useState<string>(() => {
+    const existing = localStorage.getItem('forensic_session_owner_v1');
+    if (existing) return existing;
+    const created = `usr-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    localStorage.setItem('forensic_session_owner_v1', created);
+    return created;
+  });
+
+  // Real Observations, Evidence, Contracts, Payment Cycle, CCRD 3.01+ Matrix, Legal Library, Traceability & Final Result (Clean)
   const [observaciones, setObservaciones] = useState<ObservacionDecision[]>([]);
+  const [matrizHallazgosLiteral, setMatrizHallazgosLiteral] = useState<HallazgoMatrizLiteral[]>([]);
+  const [legalLibrary, setLegalLibrary] = useState<LegalReferenceItem[]>([]);
+  const [duplicidades, setDuplicidades] = useState<DuplicityFinding[]>([]);
+  const [ccrdStages, setCcrdStages] = useState<CcrdStageStatus[]>([]);
+  const [iterations, setIterations] = useState<CaseIteration[]>([]);
   const [traceabilityLogs, setTraceabilityLogs] = useState<TraceabilityLog[]>([]);
   const [evidenceFile, setEvidenceFile] = useState<EvidenceFile | null>(null);
   const [contractRows, setContractRows] = useState<ContractEvidenceRow[]>([]);
@@ -195,6 +217,7 @@ export default function App() {
   const [realtimeAlerts, setRealtimeAlerts] = useState<RealtimeAlert[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [viewingCaseOnScreen, setViewingCaseOnScreen] = useState<CaseSession | null>(null);
+  const [viewingLegalRef, setViewingLegalRef] = useState<LegalReferenceItem | null>(null);
   const [isSavingCase, setIsSavingCase] = useState(false);
   const [lastSavedMessage, setLastSavedMessage] = useState<string | null>(null);
 
@@ -227,7 +250,9 @@ export default function App() {
 
   const fetchCasesForEntity = async (entityId: string) => {
     try {
-      const resp = await fetch(`/api/cases?entityId=${encodeURIComponent(entityId)}`);
+      const resp = await fetch(
+        `/api/cases?entityId=${encodeURIComponent(entityId)}&sessionOwnerId=${encodeURIComponent(sessionOwnerId)}`
+      );
       if (resp.ok) {
         const data = await resp.json();
         if (data.success && Array.isArray(data.cases)) {
@@ -334,6 +359,11 @@ export default function App() {
     setContractRows([]);
     setPaymentCycleRows([]);
     setObservaciones([]);
+    setMatrizHallazgosLiteral([]);
+    setLegalLibrary([]);
+    setDuplicidades([]);
+    setCcrdStages([]);
+    setIterations([]);
     setCurrentResult(null);
     setActaLectura(createEmptyDossierItem('acta-01', `Acta de Lectura — ${entity.siglas}`));
     setRecursos([]);
@@ -418,6 +448,11 @@ export default function App() {
       setContractRows([]);
       setPaymentCycleRows([]);
       setObservaciones([]);
+      setMatrizHallazgosLiteral([]);
+      setLegalLibrary([]);
+      setDuplicidades([]);
+      setCcrdStages([]);
+      setIterations([]);
       setReplicas([]);
       setContraReplicas([]);
       setDirectors([]);
@@ -484,6 +519,9 @@ export default function App() {
       const data = await res.json();
       if (data.success && data.caseRecord) {
         const rec = data.caseRecord as CaseSession;
+        if (Array.isArray(rec.iterations)) {
+          setIterations(rec.iterations);
+        }
         setEntityCases((prev) => {
           const exists = prev.some((c) => c.id === rec.id);
           return exists ? prev.map((c) => (c.id === rec.id ? rec : c)) : [rec, ...prev];
@@ -505,6 +543,7 @@ export default function App() {
       id: activeCaseId,
       codigoCaso: activeCaseCode,
       nombreCaso: effectiveName,
+      sessionOwnerId,
       estado: currentResult ? 'DICTAMEN_EMITIDO' : 'EN_PROCESO',
       timestamp: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -528,6 +567,11 @@ export default function App() {
       contraReplicas,
       directors,
       preReviewReports,
+      matrizHallazgosLiteral,
+      legalLibrary,
+      duplicidades,
+      ccrdStages,
+      iterations,
       traceabilityLogs,
       resultado: currentResult,
     };
@@ -632,9 +676,59 @@ export default function App() {
     setContraReplicas(c.contraReplicas || []);
     setDirectors(c.directors || []);
     setPreReviewReports(c.preReviewReports || {});
+    setMatrizHallazgosLiteral(c.matrizHallazgosLiteral || []);
+    setLegalLibrary(c.legalLibrary || []);
+    setDuplicidades(c.duplicidades || []);
+    setCcrdStages(c.ccrdStages || []);
+    setIterations(c.iterations || []);
     setTraceabilityLogs(c.traceabilityLogs || []);
     setCurrentResult(c.resultado || null);
     setLastSavedMessage(`Expediente ${c.codigoCaso || c.nombreCaso} cargado en pantalla para edición.`);
+  };
+
+  const handleAddDecreeToLegalLibrary = async (dir: DirectorResponsibility) => {
+    const decreeCode = dir.numeroDecretoNombramiento || `Decreto (${dir.nombre})`;
+    const firstSource = dir.fuentes?.[0];
+    const now = new Date().toISOString();
+    const sha =
+      firstSource?.sha256 ||
+      (await calculateStringSHA256(`${decreeCode}_${dir.nombre}_${firstSource?.url || ''}_${now}`));
+    const entry: LegalReferenceItem = {
+      id: `law-dec-${dir.id}-${Date.now()}`,
+      numeroNorma: decreeCode,
+      titulo: `Nombramiento Oficial: ${dir.nombre} (${dir.cargo})`,
+      jerarquia: 'DECRETO',
+      jerarquiaOrden: 4,
+      articulosPuntuales: [
+        `Gestión ${dir.fechaInicioGestion || 'N/D'} a ${dir.enFuncionesActuales ? 'Actualidad' : dir.fechaFinGestion || 'N/D'}`,
+      ],
+      hallazgosVinculados: [],
+      url: firstSource?.url || '',
+      ubicacionFuente: firstSource?.ubicacionOrigen || 'Búsqueda Oficial de Decretos',
+      resumenAplicacion:
+        firstSource?.extractoLiteral || `Acto oficial de designación para delimitación de responsabilidad administrativa.`,
+      sha256: sha,
+      fechaRegistro: now,
+    };
+    setLegalLibrary((prev) => {
+      const exists = prev.some(
+        (l) => l.numeroNorma.toLowerCase() === entry.numeroNorma.toLowerCase() && l.url === entry.url
+      );
+      if (exists) return prev;
+      return [...prev, entry].sort((a, b) => a.jerarquiaOrden - b.jerarquiaOrden);
+    });
+    logTraceabilityAction(
+      'Vinculación Decreto a Biblioteca Legal',
+      `${entry.numeroNorma} (${dir.nombre}) añadido a la Biblioteca Jurídica del Caso.`,
+      'ENTRADA'
+    );
+  };
+
+  const handleCacheLegalText = (id: string, text: string, url?: string) => {
+    setLegalLibrary((prev) =>
+      prev.map((l) => (l.id === id ? { ...l, textoExtraido: text, url: url || l.url } : l))
+    );
+    setViewingLegalRef((prev) => (prev && prev.id === id ? { ...prev, textoExtraido: text, url: url || prev.url } : prev));
   };
 
   const currentCountryConfig = PAISES_NORMATIVA.find((p) => p.codigo === selectedCountry) || PAISES_NORMATIVA[0];
@@ -652,7 +746,7 @@ export default function App() {
       <div className="bg-slate-900 border-b border-slate-800 px-4 py-2.5 text-xs flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="bg-sky-500 text-slate-950 font-bold px-2 py-0.5 rounded text-[10px] uppercase tracking-wider">
-            {activeCaseCode}
+            {activeCaseCode} {iterations.length > 0 ? `• v${iterations[0].version}` : ''}
           </span>
           <span className="font-medium text-slate-200">
             Entidad: <strong>{activeEntity ? `${activeEntity.siglas} (${activeEntity.nombre})` : 'Sin registrar'}</strong> |{' '}
@@ -1182,6 +1276,8 @@ export default function App() {
                 recursos={recursos}
                 replicas={replicas}
                 contraReplicas={contraReplicas}
+                onAddDecreeToLegalLibrary={handleAddDecreeToLegalLibrary}
+                onOpenLegalViewer={(ref) => setViewingLegalRef(ref)}
                 onLogAction={(accion, detalle) => logTraceabilityAction(accion, detalle, 'EVALUACION')}
               />
 
@@ -1199,6 +1295,35 @@ export default function App() {
                 directors={directors}
                 nombreCaso={nombreCaso}
                 onLogAction={(accion, detalle) => logTraceabilityAction(accion, detalle, 'ENTRADA')}
+              />
+
+              <CcrdNobaciMatrixSection
+                nombreCaso={nombreCaso || `Caso_${activeEntity?.siglas || 'Forense'}`}
+                activeEntity={activeEntity}
+                auditor={auditor}
+                periodo={periodo}
+                paisNormativa={currentCountryConfig.nombre}
+                selloDigital={currentResult?.digitalHash || evidenceFile?.sha256 || 'PENDIENTE_SELLO'}
+                rawTextContext={evidenceFile?.extractedText || evidenceFile?.contentSnippet || ''}
+                informePreliminarText={informePreliminar.contenido}
+                actaLecturaText={actaLectura.contenido}
+                recursosCount={recursos.length}
+                replicasCount={replicas.length}
+                contraReplicasCount={contraReplicas.length}
+                directors={directors}
+                contractRows={contractRows}
+                paymentCycleRows={paymentCycleRows}
+                observaciones={observaciones}
+                setObservaciones={setObservaciones}
+                hallazgos={matrizHallazgosLiteral}
+                setHallazgos={setMatrizHallazgosLiteral}
+                ccrdStages={ccrdStages}
+                setCcrdStages={setCcrdStages}
+                duplicidades={duplicidades}
+                setDuplicidades={setDuplicidades}
+                legalLibrary={legalLibrary}
+                onOpenLegalViewer={(ref) => setViewingLegalRef(ref)}
+                onLogAction={(accion, detalle) => logTraceabilityAction(accion, detalle, 'EVALUACION')}
               />
 
               <ObservationEvaluatorSection
@@ -1280,6 +1405,22 @@ export default function App() {
                 activeAlertsCount={realtimeAlerts.length}
               />
 
+              <LegalLibrarySection
+                paisNormativa={currentCountryConfig.nombre}
+                legalLibrary={legalLibrary}
+                setLegalLibrary={setLegalLibrary}
+                hallazgos={matrizHallazgosLiteral}
+                observaciones={observaciones}
+                directors={directors}
+                rawTextContext={[
+                  evidenceFile?.extractedText || '',
+                  informePreliminar.contenido,
+                  actaLectura.contenido,
+                ].join('\n\n')}
+                onOpenViewer={(item) => setViewingLegalRef(item)}
+                onLogAction={(accion, detalle) => logTraceabilityAction(accion, detalle, 'EVALUACION')}
+              />
+
               {currentResult && (
                 <ResultsSection
                   resultado={currentResult}
@@ -1299,6 +1440,12 @@ export default function App() {
                   replicas={replicas}
                   contraReplicas={contraReplicas}
                   directors={directors}
+                  entity={activeEntity}
+                  hallazgosLiteral={matrizHallazgosLiteral}
+                  duplicidades={duplicidades}
+                  legalLibrary={legalLibrary}
+                  ccrdStages={ccrdStages}
+                  onOpenLegalViewer={(ref) => setViewingLegalRef(ref)}
                 />
               )}
 
@@ -1341,6 +1488,14 @@ export default function App() {
         caseData={viewingCaseOnScreen}
         onClose={() => setViewingCaseOnScreen(null)}
         onLoadIntoWorkspace={handleSelectCaseFromHistory}
+        onOpenLegalViewer={(ref) => setViewingLegalRef(ref)}
+      />
+
+      {/* Clickable In-App Legal Document Viewer Modal */}
+      <LegalDocumentViewerModal
+        legalRef={viewingLegalRef}
+        onClose={() => setViewingLegalRef(null)}
+        onCacheExtractedText={handleCacheLegalText}
       />
 
       {/* Auditor Profile & Normative Scope Modal */}

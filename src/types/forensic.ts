@@ -103,7 +103,7 @@ export interface ForensicThresholds {
 export interface RealtimeAlert {
   id: string;
   timestamp: string;
-  tipo: 'ADENDA_EXCESIVA' | 'BENFORD_ANOMALIA' | 'FRACCIONAMIENTO' | 'CONCENTRACION' | 'CICLO_PAGO';
+  tipo: 'ADENDA_EXCESIVA' | 'BENFORD_ANOMALIA' | 'FRACCIONAMIENTO' | 'CONCENTRACION' | 'CICLO_PAGO' | 'DUPLICIDAD';
   severidad: 'CRÍTICA' | 'ALTA' | 'MEDIA';
   titulo: string;
   descripcion: string;
@@ -220,6 +220,94 @@ export interface InteractivePreReviewReport {
   modelUsed?: string;
 }
 
+export type NormativeHierarchyLevel =
+  | 'CONSTITUCION'
+  | 'TRATADOS_ISSAI_NIA'
+  | 'LEY'
+  | 'DECRETO'
+  | 'RESOLUCION_NOBACI'
+  | 'NORMATIVA_INTERNA';
+
+export interface LegalCitationLink {
+  norma: string;
+  articulo: string;
+  jerarquia?: NormativeHierarchyLevel;
+  url?: string;
+}
+
+export interface LegalReferenceItem {
+  id: string;
+  numeroNorma: string;
+  titulo: string;
+  jerarquia: NormativeHierarchyLevel;
+  jerarquiaOrden: number;
+  articulosPuntuales: string[];
+  hallazgosVinculados: string[];
+  url: string;
+  ubicacionFuente: string;
+  resumenAplicacion: string;
+  textoExtraido?: string;
+  esDuplicado?: boolean;
+  detalleDuplicidad?: string;
+  sha256: string;
+  fechaRegistro: string;
+}
+
+export interface HallazgoMatrizLiteral {
+  id: string;
+  idHallazgo: string;
+  titulo: string;
+  condicionLiteral: string;
+  criterioTexto: string;
+  jerarquiaCriterio: NormativeHierarchyLevel;
+  jerarquiaOrden: number;
+  causa: string;
+  efecto: string;
+  estado: 'Correcto / Cumple' | 'Con Observación / Mejora';
+  nivelRiesgo?: 'Alto (Crítico)' | 'Medio (Moderado)' | 'Bajo (Menor)';
+  puntaje0a10: number;
+  criterioAuditorOriginal?: string;
+  referenciaExacta?: string;
+  recomendacionSupervisor: string;
+  planAccionCorrectivo: string;
+  responsableArea: string;
+  entregable: string;
+  leyesCitadas: LegalCitationLink[];
+  esDuplicado?: boolean;
+  detalleDuplicidad?: string;
+  origenDocumento?: string;
+  directorResponsable?: string;
+}
+
+export interface DuplicityFinding {
+  id: string;
+  tipo: 'HALLAZGO' | 'LEY_CITA' | 'CONTRATO_PAGO';
+  elementosInvolucrados: string[];
+  similitudPct: number;
+  descripcion: string;
+  recomendacionMejora: string;
+  incluidoEnObservaciones: boolean;
+}
+
+export interface CcrdStageStatus {
+  step: number;
+  title: string;
+  description: string;
+  keyActions: string[];
+  status: 'Completado' | 'En Proceso' | 'Pendiente';
+  evidenciaVerificada: string;
+}
+
+export interface CaseIteration {
+  id: string;
+  version: number;
+  timestamp: string;
+  autor: string;
+  etapa: string;
+  resumenCambio: string;
+  sha256: string;
+}
+
 export interface ObservacionDecision {
   id: string;
   codigoObservacion: string;
@@ -286,6 +374,7 @@ export interface CaseSession {
   id: string;
   codigoCaso?: string;
   nombreCaso: string;
+  sessionOwnerId?: string;
   estado?: 'EN_PROCESO' | 'DICTAMEN_EMITIDO' | 'CERRADO';
   timestamp: string;
   updatedAt?: string;
@@ -309,6 +398,11 @@ export interface CaseSession {
   contraReplicas?: DossierSectionItem[];
   directors?: DirectorResponsibility[];
   preReviewReports?: Partial<Record<PreReviewDocType, InteractivePreReviewReport>>;
+  matrizHallazgosLiteral?: HallazgoMatrizLiteral[];
+  legalLibrary?: LegalReferenceItem[];
+  duplicidades?: DuplicityFinding[];
+  ccrdStages?: CcrdStageStatus[];
+  iterations?: CaseIteration[];
   traceabilityLogs?: TraceabilityLog[];
   resultado?: ForensicAnalysisResult | null;
 }
