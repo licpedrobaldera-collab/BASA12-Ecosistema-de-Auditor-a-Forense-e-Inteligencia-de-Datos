@@ -116,7 +116,7 @@ const HIERARCHY_PYRAMID: {
   { key: 'NORMATIVA_INTERNA', order: 6, title: '6. Normativa Interna', subtitle: 'Manuales, políticas y procedimientos', color: 'border-slate-600 bg-slate-800/70 text-slate-200' },
 ];
 
-const CCRD_16_DOMAINS_TEMPLATE: Array<{
+const CCRD_AREAS_REFERENCIALES: Array<{
   idHallazgo: string;
   titulo: string;
   jerarquiaCriterio: NormativeHierarchyLevel;
@@ -212,7 +212,12 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
     };
   }, [hallazgos]);
 
-  const handleLoad16DomainsTemplate = () => {
+  // Inline draft for adding punctual articles & norms per finding ("Lo que debe ser")
+  const [citationDraft, setCitationDraft] = useState<
+    Record<string, { norma: string; articulo: string; jerarquia: NormativeHierarchyLevel }>
+  >({});
+
+  const handleLoadReferenceAreas = () => {
     const orderMap: Record<NormativeHierarchyLevel, number> = {
       CONSTITUCION: 1,
       TRATADOS_ISSAI_NIA: 2,
@@ -222,14 +227,14 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
       NORMATIVA_INTERNA: 6,
     };
     const existingCodes = new Set(hallazgos.map((h) => h.idHallazgo.trim().toLowerCase()));
-    const newRows: HallazgoMatrizLiteral[] = CCRD_16_DOMAINS_TEMPLATE.filter(
+    const newRows: HallazgoMatrizLiteral[] = CCRD_AREAS_REFERENCIALES.filter(
       (d) => !existingCodes.has(d.idHallazgo.toLowerCase())
     ).map((d, idx) => ({
       id: `hz-tpl-${Date.now()}-${idx}`,
       idHallazgo: d.idHallazgo,
       titulo: d.titulo,
       condicionLiteral: '',
-      criterioTexto: d.criterioTexto,
+      criterioTexto: `Lo que debe ser: ${d.criterioTexto}`,
       criterioAuditorOriginal: '',
       jerarquiaCriterio: d.jerarquiaCriterio,
       jerarquiaOrden: orderMap[d.jerarquiaCriterio] || 3,
@@ -244,15 +249,15 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
       responsableArea: d.responsableArea,
       entregable: d.entregable,
       leyesCitadas: d.leyesCitadas,
-      origenDocumento: 'Plantilla Estructural 16 Dominios CCRD (Sin Datos Simulados)',
+      origenDocumento: 'Áreas Referenciales CCRD (Abierto a todos los hallazgos)',
     }));
 
     if (newRows.length > 0) {
       setHallazgos((prev) => [...prev, ...newRows]);
       setActiveTab('matriz');
       onLogAction(
-        'Carga de Plantilla 16 Dominios CCRD (3.1.01–3.8.01)',
-        `Se agregaron ${newRows.length} acápites estructurales vacíos listos para llenar con evidencia real del expediente.`
+        'Carga de Áreas Referenciales CCRD',
+        `Se incorporaron ${newRows.length} áreas base editables listas para documentar evidencia real sin límite de hallazgos.`
       );
     }
   };
@@ -559,13 +564,13 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
           </div>
           <div>
             <h2 className="text-lg sm:text-xl font-bold text-white flex items-center gap-2 flex-wrap">
-              Verificación Guía CCRD (Ley núm. 18-24) &amp; Matriz Literal 3.01+ NOBACI / CGR
+              Verificación Guía CCRD (Ley núm. 18-24) &amp; Matriz Literal Abierta NOBACI / CGR
               <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-                100% Editable • Supervisión Técnica
+                Extracción Ilimitada (Todos los Hallazgos) • 100% Editable
               </span>
             </h2>
             <p className="text-xs text-slate-400">
-              Extracción literal desde la sección 3.01+, separación de componentes correctos vs. observaciones, orden jerárquico de criterios, control de duplicidades y exportación Excel/Word del Supervisor.
+              Extracción abierta e ilimitada de todos los hallazgos del informe (3.01 en adelante o cualquier numeración), artículos y normas puntuales como Criterio (Lo que debe ser), control de duplicidades y exportación Excel/Word.
             </p>
           </div>
         </div>
@@ -578,17 +583,17 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
             className="px-3.5 py-2 bg-gradient-to-r from-sky-600 to-indigo-600 hover:from-sky-500 hover:to-indigo-500 disabled:bg-slate-800 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-lg"
           >
             {extracting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ListChecks className="w-3.5 h-3.5" />}
-            {extracting ? 'Extrayendo 3.01+...' : 'Extraer Hallazgos Literales (3.01+)'}
+            {extracting ? 'Extrayendo Hallazgos...' : 'Extraer Todos los Hallazgos (Ilimitado)'}
           </button>
 
           <button
             type="button"
-            onClick={handleLoad16DomainsTemplate}
+            onClick={handleLoadReferenceAreas}
             className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 rounded-lg text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
-            title="Agrega los 16 dominios estándar CCRD (3.1.01 a 3.8.01) en blanco para documentar evidencia real sin datos ficticios"
+            title="Incorpora áreas referenciales base editables (sin límite ni datos ficticios) para complementar los hallazgos extraídos"
           >
             <LayoutTemplate className="w-3.5 h-3.5 text-sky-400" />
-            Plantilla 16 Dominios
+            Áreas Referenciales CCRD
           </button>
 
           <button
@@ -1100,14 +1105,15 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
                   />
                 </div>
                 <div>
-                  <label className="text-[10.5px] text-slate-400 block mb-1">
-                    Criterio Normativo (Artículos Puntuales en Orden Jerárquico)
+                  <label className="text-[10.5px] text-sky-300 font-semibold block mb-1">
+                    Criterio (Lo que debe ser) — Artículos y Normas Puntuales en Orden Jerárquico
                   </label>
                   <textarea
                     rows={3}
                     value={h.criterioTexto}
                     onChange={(e) => updateRow(h.id, { criterioTexto: e.target.value })}
-                    className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sky-200 leading-relaxed"
+                    placeholder="Indique lo que debe ser según la Constitución, Tratados/ISSAI, Leyes (artículo y numeral), Decretos y Normas NOBACI..."
+                    className="w-full bg-slate-900 border border-sky-700/50 rounded-lg p-2 text-sky-200 leading-relaxed"
                   />
                 </div>
                 <div>
@@ -1152,27 +1158,128 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
                 </div>
               </div>
 
-              {/* Clickable Cited Laws Badges */}
-              {h.leyesCitadas && h.leyesCitadas.length > 0 && (
-                <div className="pt-2 border-t border-slate-800/70 flex items-center gap-1.5 flex-wrap">
-                  <span className="text-[10.5px] text-slate-400 font-semibold flex items-center gap-1 mr-1">
+              {/* Artículos y Normas Puntuales que Aplican como Criterio (Lo que debe ser) */}
+              <div className="pt-2.5 border-t border-slate-800/70 space-y-2">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <span className="text-[10.5px] text-sky-300 font-bold flex items-center gap-1">
                     <BookOpen className="w-3.5 h-3.5 text-sky-400" />
-                    Leyes Citadas (Clic para leer sin salir):
+                    Artículos y Normas Puntuales Aplicables como Criterio (Lo que debe ser — Clic para leer):
                   </span>
-                  {h.leyesCitadas.map((cite, idx) => (
-                    <button
-                      key={idx}
-                      type="button"
-                      onClick={() => handleClickCitation(cite, h.idHallazgo)}
-                      className="px-2.5 py-1 rounded-md bg-sky-500/15 hover:bg-sky-500/30 border border-sky-500/30 text-sky-300 text-[10.5px] font-semibold flex items-center gap-1 cursor-pointer transition-colors"
-                    >
-                      <CheckCircle2 className="w-3 h-3 text-sky-400" />
-                      {cite.norma}
-                      {cite.articulo ? ` (${cite.articulo})` : ''}
-                    </button>
-                  ))}
                 </div>
-              )}
+
+                {h.leyesCitadas && h.leyesCitadas.length > 0 && (
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {h.leyesCitadas.map((cite, idx) => (
+                      <div
+                        key={idx}
+                        className="inline-flex items-center rounded-md bg-sky-500/15 border border-sky-500/30 overflow-hidden"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => handleClickCitation(cite, h.idHallazgo)}
+                          className="px-2.5 py-1 hover:bg-sky-500/30 text-sky-300 text-[10.5px] font-semibold flex items-center gap-1 cursor-pointer transition-colors"
+                        >
+                          <CheckCircle2 className="w-3 h-3 text-sky-400" />
+                          {cite.norma}
+                          {cite.articulo ? ` (${cite.articulo})` : ''}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateRow(h.id, {
+                              leyesCitadas: (h.leyesCitadas || []).filter((_, cIdx) => cIdx !== idx),
+                            })
+                          }
+                          className="px-1.5 py-1 text-slate-400 hover:text-red-300 hover:bg-red-950/40 text-[10px] cursor-pointer"
+                          title="Quitar artículo/norma"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Inline Adder for Punctual Norm & Article */}
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-1.5 pt-1">
+                  <input
+                    type="text"
+                    placeholder="Norma puntual (Ej: Ley núm. 41-08 / NOBACI)"
+                    value={citationDraft[h.id]?.norma || ''}
+                    onChange={(e) =>
+                      setCitationDraft((prev) => ({
+                        ...prev,
+                        [h.id]: {
+                          norma: e.target.value,
+                          articulo: prev[h.id]?.articulo || '',
+                          jerarquia: prev[h.id]?.jerarquia || 'LEY',
+                        },
+                      }))
+                    }
+                    className="sm:col-span-4 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-[11px] text-white"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Artículo / Numeral exacto (Ej: Art. 8 num. 12)"
+                    value={citationDraft[h.id]?.articulo || ''}
+                    onChange={(e) =>
+                      setCitationDraft((prev) => ({
+                        ...prev,
+                        [h.id]: {
+                          norma: prev[h.id]?.norma || '',
+                          articulo: e.target.value,
+                          jerarquia: prev[h.id]?.jerarquia || 'LEY',
+                        },
+                      }))
+                    }
+                    className="sm:col-span-4 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-[11px] text-sky-200"
+                  />
+                  <select
+                    value={citationDraft[h.id]?.jerarquia || 'LEY'}
+                    onChange={(e) =>
+                      setCitationDraft((prev) => ({
+                        ...prev,
+                        [h.id]: {
+                          norma: prev[h.id]?.norma || '',
+                          articulo: prev[h.id]?.articulo || '',
+                          jerarquia: e.target.value as NormativeHierarchyLevel,
+                        },
+                      }))
+                    }
+                    className="sm:col-span-2 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-[11px] text-slate-300"
+                  >
+                    {HIERARCHY_PYRAMID.map((p) => (
+                      <option key={p.key} value={p.key}>
+                        {p.title}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const d = citationDraft[h.id];
+                      if (!d || !d.norma.trim()) return;
+                      updateRow(h.id, {
+                        leyesCitadas: [
+                          ...(h.leyesCitadas || []),
+                          {
+                            norma: d.norma.trim(),
+                            articulo: d.articulo.trim(),
+                            jerarquia: d.jerarquia,
+                          },
+                        ],
+                      });
+                      setCitationDraft((prev) => ({
+                        ...prev,
+                        [h.id]: { norma: '', articulo: '', jerarquia: 'LEY' },
+                      }));
+                    }}
+                    className="sm:col-span-2 px-2 py-1 bg-sky-600/30 hover:bg-sky-600/50 text-sky-200 border border-sky-500/40 rounded text-[11px] font-semibold cursor-pointer"
+                  >
+                    + Añadir Criterio
+                  </button>
+                </div>
+              </div>
             </div>
           ))}
         </div>

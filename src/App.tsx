@@ -38,6 +38,7 @@ import { CaseScreenViewerModal } from './components/CaseScreenViewerModal';
 import { PaymentCycleSection } from './components/PaymentCycleSection';
 import { AiStepCoach } from './components/AiStepCoach';
 import { DirectorResponsibilitySection } from './components/DirectorResponsibilitySection';
+import { BuscadorDecretosOficiales } from './components/BuscadorDecretosOficiales';
 import { InteractivePreReviewRunnerSection } from './components/InteractivePreReviewRunnerSection';
 import { CcrdNobaciMatrixSection } from './components/CcrdNobaciMatrixSection';
 import { LegalLibrarySection } from './components/LegalLibrarySection';
@@ -707,6 +708,9 @@ export default function App() {
       ubicacionFuente: firstSource?.ubicacionOrigen || 'Búsqueda Oficial de Decretos',
       resumenAplicacion:
         firstSource?.extractoLiteral || `Acto oficial de designación para delimitación de responsabilidad administrativa.`,
+      textoExtraido:
+        firstSource?.extractoLiteral ||
+        `${decreeCode} — ${dir.nombre} (${dir.cargo}). Período: ${dir.fechaInicioGestion || 'N/D'} a ${dir.enFuncionesActuales ? 'Actualidad' : dir.fechaFinGestion || 'N/D'}.`,
       sha256: sha,
       fechaRegistro: now,
     };
@@ -721,6 +725,82 @@ export default function App() {
       'Vinculación Decreto a Biblioteca Legal',
       `${entry.numeroNorma} (${dir.nombre}) añadido a la Biblioteca Jurídica del Caso.`,
       'ENTRADA'
+    );
+  };
+
+  const handleSaveDecreeSourceToLegalLibrary = async (item: {
+    numeroNorma: string;
+    titulo: string;
+    url: string;
+    fragmentoTexto: string;
+    ubicacionFuente: string;
+    directorNombre?: string;
+    fechaPeriodo?: string;
+  }) => {
+    const now = new Date().toISOString();
+    const sha = await calculateStringSHA256(`${item.numeroNorma}_${item.url}_${item.fragmentoTexto}_${now}`);
+    const entry: LegalReferenceItem = {
+      id: `law-dec-src-${Date.now()}`,
+      numeroNorma: item.numeroNorma,
+      titulo: item.titulo,
+      jerarquia: 'DECRETO',
+      jerarquiaOrden: 4,
+      articulosPuntuales: [
+        ...(item.directorNombre ? [`Titular: ${item.directorNombre}`] : []),
+        ...(item.fechaPeriodo ? [`Período: ${item.fechaPeriodo}`] : []),
+        'Fuente Verificada de Nombramiento Oficial',
+      ],
+      hallazgosVinculados: [],
+      url: item.url,
+      ubicacionFuente: item.ubicacionFuente,
+      resumenAplicacion: item.fragmentoTexto,
+      textoExtraido: item.fragmentoTexto,
+      sha256: sha,
+      fechaRegistro: now,
+    };
+
+    setLegalLibrary((prev) => {
+      const normUrl = (item.url || '').trim().toLowerCase();
+      const normNum = item.numeroNorma.trim().toLowerCase();
+      const idx = prev.findIndex(
+        (l) =>
+          (normUrl && (l.url || '').trim().toLowerCase() === normUrl) ||
+          (l.numeroNorma.trim().toLowerCase() === normNum && normUrl === (l.url || '').trim().toLowerCase())
+      );
+      if (idx >= 0) {
+        const updated = [...prev];
+        updated[idx] = {
+          ...updated[idx],
+          resumenAplicacion: item.fragmentoTexto || updated[idx].resumenAplicacion,
+          textoExtraido: item.fragmentoTexto || updated[idx].textoExtraido,
+          ubicacionFuente: item.ubicacionFuente || updated[idx].ubicacionFuente,
+        };
+        return updated;
+      }
+      return [...prev, entry].sort((a, b) => a.jerarquiaOrden - b.jerarquiaOrden);
+    });
+
+    logTraceabilityAction(
+      'Fuente Oficial Guardada en Biblioteca Legal',
+      `${item.numeroNorma} (${item.url || 'Fragmento textual'}) verificada y almacenada con sello SHA-256.`,
+      'ENTRADA'
+    );
+  };
+
+  const handleApplyDirectorFromSearch = (dir: DirectorResponsibility) => {
+    setDirectors((prev) => {
+      const exists = prev.some(
+        (p) =>
+          p.nombre.trim().toLowerCase() === dir.nombre.trim().toLowerCase() &&
+          p.numeroDecretoNombramiento.trim().toLowerCase() === dir.numeroDecretoNombramiento.trim().toLowerCase()
+      );
+      if (exists) return prev;
+      return [...prev, { ...dir, periodoNumero: prev.length + 1 }];
+    });
+    logTraceabilityAction(
+      'Aplicación de Director desde Buscador Oficial',
+      `Director aplicado: ${dir.nombre} (${dir.numeroDecretoNombramiento}) con ${dir.fuentes.length} fuente(s).`,
+      'EVALUACION'
     );
   };
 
@@ -1262,6 +1342,17 @@ export default function App() {
           {/* ==================== STEP 4: DIRECTORES, DOSSIER Y OBSERVACIONES ==================== */}
           {(showAllSteps || activeStep === 4) && (
             <div className="space-y-6">
+              <BuscadorDecretosOficiales
+                activeEntity={activeEntity}
+                paisNormativa={currentCountryConfig.nombre}
+                periodo={periodo}
+                legalLibrary={legalLibrary}
+                onSaveDecreeSourceToLegalLibrary={handleSaveDecreeSourceToLegalLibrary}
+                onApplyDirector={handleApplyDirectorFromSearch}
+                onOpenLegalViewer={(ref) => setViewingLegalRef(ref)}
+                onLogAction={(accion, detalle) => logTraceabilityAction(accion, detalle, 'EVALUACION')}
+              />
+
               <DirectorResponsibilitySection
                 activeEntity={activeEntity}
                 paisNormativa={currentCountryConfig.nombre}

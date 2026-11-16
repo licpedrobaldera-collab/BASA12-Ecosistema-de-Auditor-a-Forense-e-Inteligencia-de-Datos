@@ -1,18 +1,13 @@
 import React, { useMemo, useState } from 'react';
 import {
   Users,
-  Search,
-  Globe,
   Plus,
   Trash2,
   ShieldCheck,
   ExternalLink,
   Loader2,
-  CheckCircle2,
-  AlertTriangle,
   FileSearch,
   Sparkles,
-  Link2,
   Calendar,
   Scale,
 } from 'lucide-react';
@@ -85,14 +80,6 @@ export const DirectorResponsibilitySection: React.FC<Props> = ({
   onOpenLegalViewer,
   onLogAction,
 }) => {
-  const [searchDirectorQuery, setSearchDirectorQuery] = useState('');
-  const [searchFromDate, setSearchFromDate] = useState(periodo.fechaDesde || '2016-01-01');
-  const [searchToDate, setSearchToDate] = useState(periodo.fechaHasta || new Date().toISOString().split('T')[0]);
-  const [searchingOnline, setSearchingOnline] = useState(false);
-  const [searchError, setSearchError] = useState<string | null>(null);
-  const [searchNote, setSearchNote] = useState('');
-  const [groundedWebSources, setGroundedWebSources] = useState<DecreeSource[]>([]);
-  const [foundDirectors, setFoundDirectors] = useState<DirectorResponsibility[]>([]);
   const [fetchingSourceUrl, setFetchingSourceUrl] = useState<string | null>(null);
   const [sourcePreview, setSourcePreview] = useState<{ title: string; url: string; text: string } | null>(null);
 
@@ -173,69 +160,6 @@ export const DirectorResponsibilitySection: React.FC<Props> = ({
       orphanObs: observaciones.filter((o) => !assignedObs.has(o.id)).length,
     };
   }, [directors, contractRows, paymentCycleRows, observaciones, replicas, contraReplicas]);
-
-  const handleSearchDecreesOnline = async () => {
-    const entityTarget = activeEntity?.nombre || '';
-    if (!entityTarget && !searchDirectorQuery.trim()) {
-      setSearchError('Registre una entidad o escriba el nombre de un director para buscar decretos en línea.');
-      return;
-    }
-
-    setSearchingOnline(true);
-    setSearchError(null);
-    try {
-      const resp = await fetch('/api/forensic/search-appointment-decrees', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          entityName: entityTarget,
-          entitySiglas: activeEntity?.siglas || '',
-          rncNif: activeEntity?.rncNif || '',
-          paisNormativa,
-          periodoDesde: searchFromDate,
-          periodoHasta: searchToDate,
-          directorNameQuery: searchDirectorQuery,
-        }),
-      });
-      const data = await resp.json();
-      if (!resp.ok || !data.success) {
-        throw new Error(data.error || 'Error buscando decretos oficiales en línea.');
-      }
-
-      setSearchNote(data.notaBusqueda || 'Consulta oficial finalizada.');
-      setGroundedWebSources(data.webSources || []);
-      setFoundDirectors(data.directoresEncontrados || []);
-      onLogAction(
-        'Búsqueda Online Decretos IA',
-        `Consultados ${(data.directoresEncontrados || []).length} director(es) y ${(data.webSources || []).length} fuente(s) oficiales para ${entityTarget || searchDirectorQuery}.`
-      );
-    } catch (err: any) {
-      setSearchError(err.message || 'No se pudo completar la búsqueda oficial online.');
-    } finally {
-      setSearchingOnline(false);
-    }
-  };
-
-  const applyDirectorToCase = (dir: DirectorResponsibility) => {
-    setDirectors((prev) => {
-      const exists = prev.some(
-        (p) =>
-          p.nombre.trim().toLowerCase() === dir.nombre.trim().toLowerCase() &&
-          p.numeroDecretoNombramiento.trim().toLowerCase() === dir.numeroDecretoNombramiento.trim().toLowerCase()
-      );
-      if (exists) return prev;
-      return [...prev, { ...dir, periodoNumero: prev.length + 1 }];
-    });
-    onLogAction(
-      'Aplicación de Decreto y Director',
-      `Director aplicado: ${dir.nombre} (${dir.numeroDecretoNombramiento}) con ${dir.fuentes.length} fuente(s) verificada(s).`
-    );
-  };
-
-  const applyAllFoundDirectors = () => {
-    if (foundDirectors.length === 0) return;
-    foundDirectors.forEach((d) => applyDirectorToCase(d));
-  };
 
   const handleAddManualDirector = () => {
     const nextNum = directors.length + 1;
@@ -365,13 +289,13 @@ export const DirectorResponsibilitySection: React.FC<Props> = ({
           </div>
           <div>
             <h2 className="text-lg sm:text-xl font-bold text-white flex items-center gap-2 flex-wrap">
-              Buscador de Decretos Oficiales &amp; Segregación de Responsabilidad por Directores
+              Segregación de Responsabilidad por Directores y Períodos
               <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
-                Google Search + Fuentes Guardadas
+                Fuentes Guardadas &amp; Contratos/Pagos
               </span>
             </h2>
             <p className="text-xs text-slate-400">
-              Busca decretos oficiales de nombramiento en línea con IA, guarda sus URLs/fuentes de origen y segrega contratos, pagos, observaciones y contra-réplicas por cada titular.
+              Administre múltiples períodos de gestión y segrega contratos, pagos, observaciones, réplicas y contra-réplicas por cada director o titular.
             </p>
           </div>
         </div>
@@ -397,186 +321,6 @@ export const DirectorResponsibilitySection: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* Online Official Decree AI Search Bar */}
-      <div className="bg-slate-950/80 border border-indigo-500/30 rounded-xl p-4 space-y-3">
-        <div className="flex items-center justify-between flex-wrap gap-2">
-          <div className="text-xs font-bold text-indigo-300 flex items-center gap-1.5">
-            <Globe className="w-4 h-4 text-indigo-400" />
-            Buscador Oficial en Línea de Decretos de Nombramiento y Relevo (Google Search Grounding)
-          </div>
-          <span className="text-[10px] font-mono text-slate-400">
-            Entidad Activa: {activeEntity?.nombre || 'Por registrar'} ({paisNormativa})
-          </span>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-12 gap-2.5 text-xs">
-          <div className="md:col-span-5">
-            <label className="text-[11px] text-slate-400 block mb-1">
-              Nombre de Director o Filtro Específico (Opcional)
-            </label>
-            <input
-              type="text"
-              value={searchDirectorQuery}
-              onChange={(e) => setSearchDirectorQuery(e.target.value)}
-              placeholder="Ej: Todos los directores 2016-2025 o nombre específico..."
-              className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-indigo-500"
-            />
-          </div>
-          <div className="md:col-span-2">
-            <label className="text-[11px] text-slate-400 block mb-1">Desde</label>
-            <input
-              type="date"
-              value={searchFromDate}
-              onChange={(e) => setSearchFromDate(e.target.value)}
-              className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-2 text-white font-mono"
-            />
-          </div>
-          <div className="md:col-span-2">
-            <label className="text-[11px] text-slate-400 block mb-1">Hasta</label>
-            <input
-              type="date"
-              value={searchToDate}
-              onChange={(e) => setSearchToDate(e.target.value)}
-              className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-2 text-white font-mono"
-            />
-          </div>
-          <div className="md:col-span-3 flex items-end">
-            <button
-              type="button"
-              onClick={handleSearchDecreesOnline}
-              disabled={searchingOnline}
-              className="w-full py-2 px-3 bg-gradient-to-r from-indigo-600 to-sky-600 hover:from-indigo-500 hover:to-sky-500 disabled:bg-slate-800 text-white font-bold rounded-lg flex items-center justify-center gap-1.5 cursor-pointer shadow-lg"
-            >
-              {searchingOnline ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
-              {searchingOnline ? 'Buscando Decretos...' : 'Buscar Decretos Online IA'}
-            </button>
-          </div>
-        </div>
-
-        {searchError && (
-          <div className="bg-red-950/40 border border-red-800/50 rounded-lg p-2.5 text-xs text-red-200 flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
-            <span>{searchError}</span>
-          </div>
-        )}
-
-        {/* Found Online Results & Web Sources */}
-        {(foundDirectors.length > 0 || groundedWebSources.length > 0 || searchNote) && (
-          <div className="space-y-3 pt-2 border-t border-slate-800">
-            {searchNote && (
-              <div className="text-xs text-slate-300 bg-slate-900/90 border border-slate-800 rounded-lg p-3">
-                <strong className="text-indigo-300">Síntesis de Búsqueda Oficial: </strong>
-                {searchNote}
-              </div>
-            )}
-
-            {foundDirectors.length > 0 && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between flex-wrap gap-2">
-                  <span className="text-xs font-bold text-emerald-300 flex items-center gap-1.5">
-                    <CheckCircle2 className="w-4 h-4" />
-                    Directores / Decretos Localizados ({foundDirectors.length})
-                  </span>
-                  <button
-                    type="button"
-                    onClick={applyAllFoundDirectors}
-                    className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-md text-[11px] font-bold cursor-pointer"
-                  >
-                    Aplicar Todos y Guardar Fuentes
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {foundDirectors.map((fd) => (
-                    <div key={fd.id} className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 space-y-2 text-xs">
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <div className="font-bold text-white text-sm">{fd.nombre}</div>
-                          <div className="text-[11px] text-sky-300">{fd.cargo}</div>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => applyDirectorToCase(fd)}
-                          className="px-2.5 py-1 bg-sky-600 hover:bg-sky-500 text-white rounded text-[11px] font-semibold cursor-pointer shrink-0"
-                        >
-                          + Aplicar
-                        </button>
-                      </div>
-                      <div className="font-mono text-[11px] text-amber-300">
-                        {fd.numeroDecretoNombramiento} • Gestión: {fd.fechaInicioGestion || 'N/D'} a{' '}
-                        {fd.enFuncionesActuales ? 'Actualidad' : fd.fechaFinGestion || 'N/D'}
-                      </div>
-                      <p className="text-[11px] text-slate-300 line-clamp-3">{fd.notas}</p>
-                      {fd.fuentes.map((src) => (
-                        <div key={src.id} className="bg-slate-950 border border-slate-800 rounded p-2 text-[10.5px] space-y-1">
-                          <div className="text-slate-400">
-                            <strong>Ubicación / Origen:</strong> {src.ubicacionOrigen}
-                          </div>
-                          {src.url && (
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <a
-                                href={src.url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-sky-400 hover:underline flex items-center gap-1 break-all"
-                              >
-                                <ExternalLink className="w-3 h-3 shrink-0" />
-                                {src.titulo || src.url}
-                              </a>
-                              <button
-                                type="button"
-                                onClick={() => handleInspectSourceUrl(src.url, src.titulo)}
-                                className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-emerald-300 rounded text-[10px] cursor-pointer"
-                              >
-                                {fetchingSourceUrl === src.url ? 'Leyendo...' : 'Extraer Fuente'}
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {groundedWebSources.length > 0 && (
-              <div className="space-y-1.5">
-                <div className="text-[11px] font-bold text-slate-400">
-                  Fuentes Web Oficiales Verificadas por Google Grounding ({groundedWebSources.length}):
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {groundedWebSources.map((ws) => (
-                    <div
-                      key={ws.id}
-                      className="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-[11px] flex items-center gap-2"
-                    >
-                      <a
-                        href={ws.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-sky-400 hover:underline flex items-center gap-1 max-w-[260px] truncate"
-                        title={ws.url}
-                      >
-                        <Link2 className="w-3 h-3 shrink-0" />
-                        {ws.titulo}
-                      </a>
-                      <button
-                        type="button"
-                        onClick={() => handleInspectSourceUrl(ws.url, ws.titulo)}
-                        className="text-[10px] px-1.5 py-0.5 bg-slate-800 hover:bg-slate-700 text-emerald-300 rounded cursor-pointer"
-                      >
-                        {fetchingSourceUrl === ws.url ? '...' : 'Leer'}
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
       {/* Editable Multi-Period Directors List */}
       <div className="space-y-4">
         <div className="flex items-center justify-between flex-wrap gap-2">
@@ -595,7 +339,7 @@ export const DirectorResponsibilitySection: React.FC<Props> = ({
         {directors.length === 0 ? (
           <div className="bg-slate-950/60 border border-dashed border-slate-800 rounded-xl p-6 text-center text-xs text-slate-400 space-y-2">
             <p>
-              No hay directores cargados todavía. Use el botón <strong className="text-indigo-300">"Buscar Decretos Online IA"</strong> para localizar los decretos oficiales reales de nombramiento o agregue uno manualmente.
+              No hay directores cargados todavía. Use el <strong className="text-indigo-300">Buscador de Decretos Oficiales</strong> superior para localizar decretos de nombramiento o agregue un período manualmente.
             </p>
           </div>
         ) : (

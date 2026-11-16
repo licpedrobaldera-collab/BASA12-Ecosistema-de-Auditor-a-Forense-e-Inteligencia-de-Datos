@@ -1463,6 +1463,7 @@ REGLAS ESTRICTAS DE RIGOR Y TRAZABILIDAD:
                 url: href,
                 titulo: title,
                 ubicacionOrigen: `Búsqueda Web Verificada (${new URL(href).hostname})`,
+                extractoLiteral: snippet,
                 fechaConsulta: nowIso,
                 sha256,
                 verificadoWeb: true,
@@ -1492,6 +1493,7 @@ REGLAS ESTRICTAS DE RIGOR Y TRAZABILIDAD:
                 url: pageUrl,
                 titulo: h.title,
                 ubicacionOrigen: 'Wikipedia Pública (Referencia Secundaria)',
+                extractoLiteral: cleanSnippet,
                 fechaConsulta: nowIso,
                 sha256,
                 verificadoWeb: true,
@@ -1547,22 +1549,41 @@ Devuelve JSON estricto con la clave "notaBusqueda" y el arreglo "directoresEncon
     });
 
     const rawChunks = groundingMetadata?.groundingChunks || [];
+    const rawSupports = groundingMetadata?.groundingSupports || [];
     const searchQueries: string[] = groundingMetadata?.webSearchQueries || [];
 
+    const chunkSnippets = new Map<number, string[]>();
+    for (const sup of rawSupports) {
+      const segText = String(sup?.segment?.text || '').trim();
+      const indices: number[] = Array.isArray(sup?.groundingChunkIndices) ? sup.groundingChunkIndices : [];
+      if (!segText) continue;
+      for (const cIdx of indices) {
+        const arr = chunkSnippets.get(cIdx) || [];
+        if (arr.length < 3 && !arr.includes(segText)) arr.push(segText);
+        chunkSnippets.set(cIdx, arr);
+      }
+    }
+
     const groundedSources = rawChunks
-      .filter((c: any) => c?.web?.uri)
-      .map((c: any, idx: number) => {
-        const uri = String(c.web.uri);
-        const title = String(c.web.title || uri);
+      .map((c: any, idx: number) => ({ c, idx }))
+      .filter((x: any) => x.c?.web?.uri)
+      .map((x: any) => {
+        const uri = String(x.c.web.uri);
+        const title = String(x.c.web.title || uri);
+        const snippetList = chunkSnippets.get(x.idx) || [];
+        const extractoLiteral =
+          snippetList.join(' ... ') ||
+          `Referencia oficial recuperada vía Google Search para ${entityName || directorNameQuery}: ${title}`;
         const sha256 = crypto
           .createHash('sha256')
           .update(`${uri}_${title}_${nowIso}`)
           .digest('hex');
         return {
-          id: `src-web-${Date.now()}-${idx}`,
+          id: `src-web-${Date.now()}-${x.idx}`,
           url: uri,
           titulo: title,
           ubicacionOrigen: `Google Search Grounding (${title})`,
+          extractoLiteral,
           fechaConsulta: nowIso,
           sha256,
           verificadoWeb: true,
@@ -2054,40 +2075,104 @@ app.post('/api/forensic/extract-hallazgos-ccrd', async (req, res) => {
       }
     }
 
+    // Deterministic helper for specific normative articles ("Criterio: Lo que debe ser")
+    const inferGranularCriteria = (txt: string): { criterioTexto: string; leyesCitadas: any[] } => {
+      const low = txt.toLowerCase();
+      const cites: any[] = [];
+      const parts: string[] = [];
+
+      if (low.includes('pacc') || low.includes('plan anual') || low.includes('compra') || low.includes('contrat')) {
+        cites.push(
+          { norma: 'Ley núm. 340-06', articulo: 'Arts. 32 y 33 (Umbrales, pluralidad y PACC)', jerarquia: 'LEY' },
+          { norma: 'Decreto núm. 543-12', articulo: 'Art. 31 (Publicación y plazos del PACC)', jerarquia: 'DECRETO' },
+          { norma: 'NOBACI ADC-03-004.19', articulo: 'Controles de Compras y Recepciones', jerarquia: 'RESOLUCION_NOBACI' }
+        );
+        parts.push('Lo que debe ser: Todo proceso de adquisición debe estar programado en el PACC publicado oportunamente (Ley 340-06 Art. 33; Decreto 543-12 Art. 31) y cumplir umbrales y pluralidad de oferentes (Ley 340-06 Art. 32; NOBACI ADC-03-004.19).');
+      }
+      if (low.includes('personal') || low.includes('rr. hh') || low.includes('recurso humano') || low.includes('nómina') || low.includes('nomina') || low.includes('desempe') || low.includes('cargo')) {
+        cites.push(
+          { norma: 'Ley núm. 41-08', articulo: 'Art. 8 num. 12 y Art. 50 (Manuales MAP y Evaluaciones)', jerarquia: 'LEY' },
+          { norma: 'Ley núm. 311-14', articulo: 'Arts. 1 y 2 (Declaración Jurada de Patrimonio)', jerarquia: 'LEY' },
+          { norma: 'Decreto núm. 527-09', articulo: 'Art. 3 (Estructura Organizativa)', jerarquia: 'DECRETO' },
+          { norma: 'NOBACI ADC-3-006', articulo: 'Nums. 4, 20, 33 y 86 (Control Interno RR. HH.)', jerarquia: 'RESOLUCION_NOBACI' }
+        );
+        parts.push('Lo que debe ser: Contar con estructura organizativa y manual de cargos aprobados por el MAP (Ley 41-08 Art. 8 num. 12; Decreto 527-09 Art. 3), evaluaciones anuales (Art. 50), expedientes completos con Declaración Jurada (Ley 311-14) y controles NOBACI ADC-3-006.');
+      }
+      if (low.includes('activo') || low.includes('inventario') || low.includes('almac')) {
+        cites.push(
+          { norma: 'NOBACI ADC-3-001.3', articulo: 'Control de Inventarios y Activos Fijos', jerarquia: 'RESOLUCION_NOBACI' },
+          { norma: 'Ley núm. 10-04', articulo: 'Arts. 10 y 38 (Control Interno e Inventarios)', jerarquia: 'LEY' }
+        );
+        parts.push('Lo que debe ser: Registro físico codificado, conciliación periódica de inventarios y custodia patrimonial formal (NOBACI / NOBIS Activos Fijos y ADC-3-001.3).');
+      }
+      if (low.includes('concilia') || low.includes('banco') || low.includes('tesorer') || low.includes('pago') || low.includes('viático') || low.includes('viatico')) {
+        cites.push(
+          { norma: 'Ley núm. 18-24', articulo: 'Arts. 10, 25 y 38 (Fiscalización CCRD)', jerarquia: 'LEY' },
+          { norma: 'Normas Básicas de Tesorería', articulo: 'Conciliación y Doble Visado', jerarquia: 'RESOLUCION_NOBACI' }
+        );
+        parts.push('Lo que debe ser: Conciliaciones bancarias mensuales sin partidas flotantes vencidas, control previo y autorización dual en pagos y liquidación de viáticos (Ley 18-24 Art. 10; Normas de Tesorería).');
+      }
+      if (low.includes('ambient') || low.includes('residuo')) {
+        cites.push({ norma: 'Ley núm. 64-00', articulo: 'Arts. 40 y 41 (Permisos Ambientales)', jerarquia: 'LEY' });
+        parts.push('Lo que debe ser: Mantener permisos ambientales vigentes y manifiestos trazables conforme a la Ley núm. 64-00.');
+      }
+      if (cites.length === 0) {
+        cites.push(
+          { norma: 'Ley núm. 18-24', articulo: 'Arts. 10, 25 y 38 (CCRD)', jerarquia: 'LEY' },
+          { norma: 'Ley núm. 498-06', articulo: 'Arts. 24 y 25 lit. d (Planificación)', jerarquia: 'LEY' },
+          { norma: 'Normas NOBACI / CGR', articulo: 'Ambiente de Control y Evidencia', jerarquia: 'RESOLUCION_NOBACI' }
+        );
+        parts.push('Lo que debe ser: Cumplimiento estricto del principio de legalidad y control interno institucional bajo la Ley núm. 18-24 (Arts. 10, 25 y 38), Ley 498-06 (Arts. 24-25.d) y Normas Básicas de Control Interno (NOBACI).');
+      }
+
+      return { criterioTexto: parts.join(' '), leyesCitadas: cites };
+    };
+
     const ai = getAiClient();
     let aiHallazgos: any[] = [];
     let modelUsed = 'deterministic-parser';
 
     if (ai) {
       try {
-        const promptText = `
-[EXTRACCIÓN LITERAL DE HALLAZGOS 3.01 EN ADELANTE Y EVALUACIÓN DE SUPERVISIÓN CGR / CCRD / NOBACI]
+        // Chunk large documents so we NEVER lose or cap findings at 16 or 30 (unlimited extraction)
+        const CHUNK_SIZE = 32000;
+        const chunks: string[] = [];
+        for (let offset = 0; offset < combinedText.length; offset += CHUNK_SIZE) {
+          chunks.push(combinedText.slice(offset, offset + CHUNK_SIZE));
+        }
+
+        const seenChunkKeys = new Set<string>();
+        for (let cIdx = 0; cIdx < chunks.length; cIdx++) {
+          const chunkText = chunks[cIdx];
+          const promptText = `
+[EXTRACCIÓN LITERAL ILIMITADA DE HALLAZGOS — SIN LÍMITE NUMÉRICO (TODOS LOS EXISTENTES EN EL DOCUMENTO)]
 Entidad Auditada: ${entityName}
 Jurisdicción: ${paisNormativa}
 Período: ${periodo?.fechaDesde || 'N/D'} al ${periodo?.fechaHasta || 'N/D'}
+Bloque Documental: ${cIdx + 1} de ${chunks.length}
 
-REGLA ESTRICTA DE INTEGRIDAD DOCUMENTAL:
-1. Extrae ÚNICAMENTE acápites/hallazgos que consten REALMENTE en el TEXTO SUMINISTRADO (priorizando numeración desde 3.01, 3.02, 3.1.01 hasta 3.8.01 en adelante; si el texto usa otra numeración real de hallazgos, respétala literalmente).
-2. NO inventes ni alteres hechos, cifras, fechas ni normas que no se desprendan del texto real.
-3. Redacta las recomendaciones en tono de SUPERVISOR / REVISOR TÉCNICO DE AUDITORÍA GUBERNAMENTAL (NO menciones "IA", "inteligencia artificial" ni "modelo" en ningún campo).
-4. Ordena el criterio de cada hallazgo conforme al Orden Jerárquico Normativo:
+REGLA ESTRICTA DE INTEGRIDAD Y COMPLETITUD (INFINITO / ABIERTO):
+1. Extrae TODOS los acápites y hallazgos presentes en este bloque documental SIN LÍMITE FIJO (NO te detengas en 16 ni omitas ningún acápite; si hay 3, 25, 60 o más en todo el informe, extrae absolutamente todos). Respeta la numeración original (3.01, 3.1.01, Hallazgo 1, Observación A, etc.).
+2. NO inventes hechos, cifras ni fechas que no figuren en el documento real.
+3. Redacta en tono exclusivo de SUPERVISOR / REVISOR TÉCNICO DE AUDITORÍA GUBERNAMENTAL (NUNCA menciones "IA", "inteligencia artificial" ni "modelo" en ningún campo).
+4. CRITERIO ("LO QUE DEBE SER"): En "criterioTexto" y en "leyesCitadas", especifica OBLIGATORIAMENTE los ARTÍCULOS, NUMERALES, LITERALES y NORMAS PUNTUALES que aplican como "Lo que debe ser" en estricto Orden Jerárquico:
    1 = CONSTITUCION, 2 = TRATADOS_ISSAI_NIA, 3 = LEY, 4 = DECRETO, 5 = RESOLUCION_NOBACI, 6 = NORMATIVA_INTERNA.
-5. Marco técnico aplicable para diagnóstico de brechas (cuando aplique al texto): Ley 18-24 (Arts. 10, 25 y 38 - CCRD), Ley 340-06 (Arts. 32 y 33), Ley 41-08 (Art. 8 num. 12 y Art. 50), Ley 311-14, Decreto 527-09 (Art. 3), Ley 498-06 (Arts. 24 y 25.d), Decreto 543-12 (Art. 31), Normas NOBACI 3 / NOBIS (ADC-3-006 nums. 4, 20, 33, 86; ADC-03-004.19; ADC-3-001.3; Activos Fijos), Ley 10-04 y Ley 64-00.
+5. Referencia normativa base aplicable en RD: Ley 18-24 (Arts. 10, 25, 38), Ley 340-06 (Arts. 32, 33), Ley 41-08 (Art. 8 num. 12 y Art. 50), Ley 311-14 (Arts. 1-5), Decreto 527-09 (Art. 3), Ley 498-06 (Arts. 24, 25.d), Decreto 543-12 (Art. 31), Normas NOBACI / NOBIS (ADC-3-006 nums. 4, 20, 33, 86; ADC-03-004.19; ADC-3-001.3; Ambiente de Control y Activos Fijos), Ley 10-04, NICSP 19 y Ley 64-00.
 
-${verbatimBlocks.length > 0 ? `BLOQUES PRE-DETECTADOS (3.01+):\n${JSON.stringify(verbatimBlocks.slice(0, 30), null, 2)}\n` : ''}
+${cIdx === 0 && verbatimBlocks.length > 0 ? `ÍNDICE DE BLOQUES DETECTADOS (${verbatimBlocks.length} totales):\n${JSON.stringify(verbatimBlocks.map((b) => ({ idCode: b.idCode, title: b.title })), null, 2)}\n` : ''}
 
-[TEXTO REAL DEL EXPEDIENTE / INFORME]:
-${combinedText.slice(0, 36000)}
+[TEXTO REAL DEL DOCUMENTO — BLOQUE ${cIdx + 1}/${chunks.length}]:
+${chunkText}
 
 Devuelve JSON estricto con esta estructura:
 {
   "hallazgos": [
     {
-      "idHallazgo": "3.1.01",
+      "idHallazgo": "Código exacto (ej. 3.01, 3.1.01, H-01)",
       "titulo": "Título literal o exacto del acápite",
       "condicionLiteral": "Extracto textual de lo que existe en el documento cargado sin alterar hechos.",
-      "criterioAuditorOriginal": "Criterio tal como aparece citado originalmente en el borrador/documento (si existe).",
-      "criterioTexto": "Cita textual normativa sugerida y artículos puntuales aplicables según jerarquía.",
+      "criterioAuditorOriginal": "Criterio citado originalmente en el borrador/documento (si existe).",
+      "criterioTexto": "Lo que debe ser: Cita puntual de artículos, numerales y normas aplicables en orden jerárquico.",
       "jerarquiaCriterio": "LEY | DECRETO | RESOLUCION_NOBACI | TRATADOS_ISSAI_NIA | CONSTITUCION | NORMATIVA_INTERNA",
       "nivelRiesgo": "Alto (Crítico) | Medio (Moderado) | Bajo (Menor)",
       "referenciaExacta": "Página, sección o documento origen exacto donde consta",
@@ -2097,8 +2182,8 @@ Devuelve JSON estricto con esta estructura:
       "puntaje0a10": 7.5,
       "recomendacionSupervisor": "Recomendación técnica del Supervisor/Revisor basada exclusivamente en el hallazgo real para lograr 10/10.",
       "planAccionCorrectivo": "Pasos concretos de subsanación",
-      "responsableArea": "RR. HH. / Planificación / Compras / Almacén / Dirección Administrativa",
-      "entregable": "Manual, política o formulario requerido",
+      "responsableArea": "Área institucional responsable",
+      "entregable": "Manual, política o evidencia documental requerida",
       "leyesCitadas": [
         { "norma": "Ley núm. 41-08", "articulo": "Art. 8, num. 12", "jerarquia": "LEY" }
       ]
@@ -2106,14 +2191,21 @@ Devuelve JSON estricto con esta estructura:
   ]
 }
 `;
-        const resp = await callGeminiWithResilience(ai, {
-          contents: promptText,
-          config: { responseMimeType: 'application/json' },
-        });
-        const parsed = parseJsonSafe<any>(resp.response.text || '{}', { hallazgos: [] });
-        if (Array.isArray(parsed.hallazgos)) {
-          aiHallazgos = parsed.hallazgos;
-          modelUsed = resp.modelUsed;
+          const resp = await callGeminiWithResilience(ai, {
+            contents: promptText,
+            config: { responseMimeType: 'application/json' },
+          });
+          const parsed = parseJsonSafe<any>(resp.response.text || '{}', { hallazgos: [] });
+          if (Array.isArray(parsed.hallazgos)) {
+            modelUsed = resp.modelUsed;
+            for (const item of parsed.hallazgos) {
+              const dedupKey = `${String(item.idHallazgo || '').toLowerCase()}_${String(item.titulo || '').toLowerCase().slice(0, 40)}`;
+              if (!seenChunkKeys.has(dedupKey)) {
+                seenChunkKeys.add(dedupKey);
+                aiHallazgos.push(item);
+              }
+            }
+          }
         }
       } catch (aiErr) {
         console.warn('extract-hallazgos-ccrd AI fallback to verbatim parser:', aiErr);
@@ -2122,12 +2214,13 @@ Devuelve JSON estricto con esta estructura:
 
     const rawSourceList = aiHallazgos.length > 0 ? aiHallazgos : verbatimBlocks.map((b) => {
       const isObs = /debilidad|incumplimiento|ausencia|fuera de plazo|error|diferencia|sin\s+|vencid/i.test(b.rawBlock);
+      const crit = inferGranularCriteria(`${b.title} ${b.rawBlock}`);
       return {
         idHallazgo: b.idCode,
         titulo: b.title,
         condicionLiteral: b.rawBlock,
         criterioAuditorOriginal: 'Verificado en texto original cargado',
-        criterioTexto: 'Verificar artículo puntual aplicable en el Orden Jerárquico Normativo.',
+        criterioTexto: crit.criterioTexto,
         jerarquiaCriterio: inferHierarchy(b.rawBlock).level,
         nivelRiesgo: isObs ? 'Alto (Crítico)' : 'Bajo (Menor)',
         referenciaExacta: `Acápite ${b.idCode}`,
@@ -2139,25 +2232,25 @@ Devuelve JSON estricto con esta estructura:
         planAccionCorrectivo: 'Subsanar brecha documental y actualizar registros institucionales.',
         responsableArea: 'Área Auditada Responsable',
         entregable: 'Informe de cumplimiento y soporte documental',
-        leyesCitadas: [],
+        leyesCitadas: crit.leyesCitadas,
       };
     });
 
-    // If still empty (no 3.xx pattern in doc), extract paragraph blocks literally so nothing is invented
+    // Open fallback without artificial 16-item cap: process ALL detected document paragraphs/sections
     const fallbackParagraphs =
       rawSourceList.length === 0
         ? combinedText
             .split(/\n{2,}/)
             .filter((p) => p.trim().length > 40)
-            .slice(0, 16)
             .map((p, idx) => {
               const isObs = /debilidad|incumplimiento|ausencia|fuera de plazo|error|diferencia|observa/i.test(p);
+              const crit = inferGranularCriteria(p);
               return {
                 idHallazgo: `3.${String(idx + 1).padStart(2, '0')}`,
                 titulo: p.trim().split(/\n/)[0].slice(0, 90),
-                condicionLiteral: p.trim().slice(0, 1200),
+                condicionLiteral: p.trim().slice(0, 1400),
                 criterioAuditorOriginal: 'Texto literal del documento',
-                criterioTexto: 'Ley núm. 18-24 y Normas NOBACI aplicables al acápite.',
+                criterioTexto: crit.criterioTexto,
                 jerarquiaCriterio: inferHierarchy(p).level,
                 nivelRiesgo: isObs ? 'Medio (Moderado)' : 'Bajo (Menor)',
                 referenciaExacta: `Bloque textual #${idx + 1}`,
@@ -2165,11 +2258,11 @@ Devuelve JSON estricto con esta estructura:
                 efecto: 'Impacto sujeto a validación de supervisión.',
                 estado: isObs ? 'Con Observación / Mejora' : 'Correcto / Cumple',
                 puntaje0a10: isObs ? 7.0 : 9.5,
-                recomendacionSupervisor: 'Verificar correspondencia con la documentación fuente y sustentar criterio normativo.',
-                planAccionCorrectivo: 'Alinear proceso con manuales de control interno NOBACI.',
+                recomendacionSupervisor: 'Verificar correspondencia con la documentación fuente y sustentar artículos puntuales aplicables.',
+                planAccionCorrectivo: 'Alinear proceso con manuales de control interno NOBACI y marco legal vigente.',
                 responsableArea: 'Dirección Administrativa / Área Técnica',
                 entregable: 'Evidencia de verificación',
-                leyesCitadas: [],
+                leyesCitadas: crit.leyesCitadas,
               };
             })
         : rawSourceList;

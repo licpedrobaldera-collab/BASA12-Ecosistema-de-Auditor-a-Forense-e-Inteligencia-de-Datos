@@ -526,7 +526,7 @@ export function downloadSupervisorWordReport(params: {
       <th width="9%">Código &amp; Riesgo</th>
       <th width="18%">Título &amp; Jerarquía</th>
       <th width="24%">Condición Literal (Documento Real)</th>
-      <th width="22%">Criterio, Causa y Efecto</th>
+      <th width="22%">Criterio (Lo que debe ser), Causa y Efecto</th>
       <th width="27%">Resultado del Análisis del Supervisor &amp; Plan Correctivo</th>
     </tr>
     ${(conObservacion.length > 0 ? conObservacion : hallazgos)
@@ -547,7 +547,14 @@ export function downloadSupervisorWordReport(params: {
       <td>${escapeHtml(h.condicionLiteral)}</td>
       <td>
         ${h.criterioAuditorOriginal ? `<strong>Criterio Original:</strong> ${escapeHtml(h.criterioAuditorOriginal)}<br/>` : ''}
-        <strong>Criterio Técnico:</strong> ${escapeHtml(h.criterioTexto)}<br/>
+        <strong>Criterio (Lo que debe ser):</strong> ${escapeHtml(h.criterioTexto)}<br/>
+        ${
+          h.leyesCitadas && h.leyesCitadas.length > 0
+            ? `<strong>Artículos y Normas Puntuales:</strong> ${escapeHtml(
+                h.leyesCitadas.map((l) => `${l.norma}${l.articulo ? ` (${l.articulo})` : ''}`).join('; ')
+              )}<br/>`
+            : ''
+        }
         <strong>Causa:</strong> ${escapeHtml(h.causa)}<br/>
         <strong>Efecto:</strong> ${escapeHtml(h.efecto)}
       </td>

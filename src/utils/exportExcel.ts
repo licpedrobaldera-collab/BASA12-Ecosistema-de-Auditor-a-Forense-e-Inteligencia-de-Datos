@@ -56,16 +56,16 @@ export function exportCcrdLiteralMatrixExcel(params: {
     'Nivel Jerárquico Criterio': HIERARCHY_LABELS[h.jerarquiaCriterio] || h.jerarquiaCriterio,
     'Condición Literal (Documento Real)': h.condicionLiteral,
     'Criterio Original del Auditor': h.criterioAuditorOriginal || '',
-    'Criterio Normativo Sugerido (10/10)': h.criterioTexto,
+    'Criterio (Lo que debe ser) — Artículos y Normas Puntuales': h.criterioTexto,
+    'Artículos y Normas Puntuales Aplicables': (h.leyesCitadas || [])
+      .map((l) => `${l.norma}${l.articulo ? ` (${l.articulo})` : ''}`)
+      .join(' | '),
     'Causa Raíz': h.causa,
     'Efecto / Riesgo Institucional': h.efecto,
     'Resultado del Análisis del Supervisor / Revisor': h.recomendacionSupervisor,
     'Plan de Acción Correctivo': h.planAccionCorrectivo,
     'Área Responsable': h.responsableArea,
     'Entregable Requerido': h.entregable,
-    'Leyes / Normas Citadas': (h.leyesCitadas || [])
-      .map((l) => `${l.norma}${l.articulo ? ` (${l.articulo})` : ''}`)
-      .join(' | '),
     'Director / Titular Período': h.directorResponsable || 'Por asignar',
     'Alerta Duplicidad': h.esDuplicado ? `SÍ: ${h.detalleDuplicidad || 'Revisar'}` : 'No',
     'Origen Documental': h.origenDocumento || 'Expediente',
