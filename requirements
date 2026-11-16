@@ -1,6 +1,5 @@
 streamlit
 google-genai
-firebase-admin
 pandas
 numpy
 sqlalchemy
