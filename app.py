@@ -1,6 +1,5 @@
 {
-  "name": "react-example",
-  "private": true,
+  "import streamlit as st",
   "version": "0.0.0",
   "type": "module",
   "scripts": {
