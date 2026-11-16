@@ -1,0 +1,535 @@
+{
+  "entities": {
+    "UserPublic": {
+      "title": "UserPublic",
+      "description": "Perfil público del auditor autenticado en el ecosistema forense.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "cargo": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "entidadProfesional": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "cargo",
+        "entidadProfesional",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserPrivate": {
+      "title": "UserPrivate",
+      "description": "Información PII aislada del auditor (correo, cédula, colegiatura).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "cedulaId": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "colegiatura": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "pais": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "email",
+        "cedulaId",
+        "colegiatura",
+        "pais",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AuditedEntityDoc": {
+      "title": "AuditedEntityDoc",
+      "description": "Entidad real auditada registrada desde cero por el usuario propietario.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "nombre": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "siglas": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "rncNif": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "sector": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "paisCodigo": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 8
+        },
+        "moneda": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 10
+        },
+        "simboloMoneda": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 10
+        },
+        "urlPortal": {
+          "type": "string",
+          "maxLength": 600
+        },
+        "descripcion": {
+          "type": "string",
+          "maxLength": 12000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerUid",
+        "nombre",
+        "siglas",
+        "rncNif",
+        "sector",
+        "paisCodigo",
+        "moneda",
+        "simboloMoneda",
+        "urlPortal",
+        "descripcion",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AuditProjectDoc": {
+      "title": "AuditProjectDoc",
+      "description": "Proyecto / expediente de auditoría forense con matrices, hallazgos 3.01+, biblioteca legal y dictamen.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "entityId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "codigoCaso": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "nombreCaso": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "estado": {
+          "type": "string",
+          "enum": ["EN_PROCESO", "DICTAMEN_EMITIDO", "CERRADO"],
+          "maxLength": 32
+        },
+        "requerimiento": {
+          "type": "string",
+          "maxLength": 15000
+        },
+        "selloDigital": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "paisNormativa": {
+          "type": "string",
+          "maxLength": 16
+        },
+        "idioma": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "origenes": {
+          "type": "array"
+        },
+        "entitySnapshot": {
+          "type": "object"
+        },
+        "auditorSnapshot": {
+          "type": "object"
+        },
+        "periodoSnapshot": {
+          "type": "object"
+        },
+        "counts": {
+          "type": "object"
+        },
+        "evidenceSummary": {
+          "type": "object"
+        },
+        "contractRows": {
+          "type": "array"
+        },
+        "paymentCycleRows": {
+          "type": "array"
+        },
+        "observaciones": {
+          "type": "array"
+        },
+        "actaLectura": {
+          "type": "object"
+        },
+        "recursos": {
+          "type": "array"
+        },
+        "informePreliminar": {
+          "type": "object"
+        },
+        "replicas": {
+          "type": "array"
+        },
+        "contraReplicas": {
+          "type": "array"
+        },
+        "directors": {
+          "type": "array"
+        },
+        "preReviewReports": {
+          "type": "object"
+        },
+        "matrizHallazgosLiteral": {
+          "type": "array"
+        },
+        "legalLibrary": {
+          "type": "array"
+        },
+        "duplicidades": {
+          "type": "array"
+        },
+        "ccrdStages": {
+          "type": "array"
+        },
+        "traceabilityLogs": {
+          "type": "array"
+        },
+        "resultado": {
+          "type": "object"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerUid",
+        "entityId",
+        "codigoCaso",
+        "nombreCaso",
+        "estado",
+        "requerimiento",
+        "selloDigital",
+        "paisNormativa",
+        "idioma",
+        "origenes",
+        "entitySnapshot",
+        "auditorSnapshot",
+        "periodoSnapshot",
+        "counts",
+        "contractRows",
+        "paymentCycleRows",
+        "observaciones",
+        "actaLectura",
+        "recursos",
+        "informePreliminar",
+        "replicas",
+        "contraReplicas",
+        "directors",
+        "preReviewReports",
+        "matrizHallazgosLiteral",
+        "legalLibrary",
+        "duplicidades",
+        "ccrdStages",
+        "traceabilityLogs",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ProjectUploadDoc": {
+      "title": "ProjectUploadDoc",
+      "description": "Registro individual de carga documental real (archivo, enlace portal o texto) con sello SHA-256.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "entityId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fileName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 260
+        },
+        "sourceType": {
+          "type": "string",
+          "enum": ["ARCHIVO", "URL_PORTAL", "TEXTO_DIRECTO"],
+          "maxLength": 32
+        },
+        "parsedFormat": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "mimeType": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "sizeBytes": {
+          "type": "number"
+        },
+        "sha256": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 128
+        },
+        "sourceUrl": {
+          "type": "string",
+          "maxLength": 800
+        },
+        "contentSnippet": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "extractedText": {
+          "type": "string",
+          "maxLength": 350000
+        },
+        "extractedRows": {
+          "type": "array"
+        },
+        "numericAmounts": {
+          "type": "array"
+        },
+        "sheetNames": {
+          "type": "array"
+        },
+        "discoveredLinks": {
+          "type": "array"
+        },
+        "pageCount": {
+          "type": "number"
+        },
+        "recordCount": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "projectId",
+        "entityId",
+        "ownerUid",
+        "fileName",
+        "sourceType",
+        "parsedFormat",
+        "mimeType",
+        "sizeBytes",
+        "sha256",
+        "sourceUrl",
+        "contentSnippet",
+        "extractedText",
+        "extractedRows",
+        "numericAmounts",
+        "sheetNames",
+        "discoveredLinks",
+        "pageCount",
+        "recordCount",
+        "createdAt"
+      ]
+    },
+    "ProjectIterationDoc": {
+      "title": "ProjectIterationDoc",
+      "description": "Historial inmutable de iteraciones y versiones guardadas de un proyecto forense.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "version": {
+          "type": "number"
+        },
+        "autor": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "etapa": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "resumenCambio": {
+          "type": "string",
+          "maxLength": 600
+        },
+        "sha256": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "projectId",
+        "ownerUid",
+        "version",
+        "autor",
+        "etapa",
+        "resumenCambio",
+        "sha256",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserPublic"
+      },
+      "description": "Perfil público del auditor propietario."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": {
+        "$ref": "#/entities/UserPrivate"
+      },
+      "description": "Datos PII aislados del usuario autenticado."
+    },
+    "/entities/{entityId}": {
+      "schema": {
+        "$ref": "#/entities/AuditedEntityDoc"
+      },
+      "description": "Entidades reales registradas desde cero por el usuario propietario."
+    },
+    "/projects/{projectId}": {
+      "schema": {
+        "$ref": "#/entities/AuditProjectDoc"
+      },
+      "description": "Proyectos y expedientes de auditoría vinculados a una entidad real."
+    },
+    "/projects/{projectId}/uploads/{uploadId}": {
+      "schema": {
+        "$ref": "#/entities/ProjectUploadDoc"
+      },
+      "description": "Historial de cargas reales (archivos, URLs y textos literales) vinculadas a cada proyecto."
+    },
+    "/projects/{projectId}/iterations/{iterationId}": {
+      "schema": {
+        "$ref": "#/entities/ProjectIterationDoc"
+      },
+      "description": "Historial de iteraciones versionadas y selladas con SHA-256 por proyecto."
+    }
+  }
+}

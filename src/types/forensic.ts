@@ -277,6 +277,7 @@ export interface HallazgoMatrizLiteral {
   detalleDuplicidad?: string;
   origenDocumento?: string;
   directorResponsable?: string;
+  etapaCcrd?: 1 | 2 | 3 | 4;
 }
 
 export interface DuplicityFinding {
@@ -406,3 +407,27 @@ export interface CaseSession {
   traceabilityLogs?: TraceabilityLog[];
   resultado?: ForensicAnalysisResult | null;
 }
+
+export interface ProjectUploadRecord {
+  id: string;
+  projectId: string;
+  entityId: string;
+  ownerUid: string;
+  fileName: string;
+  sourceType: 'ARCHIVO' | 'URL_PORTAL' | 'TEXTO_DIRECTO';
+  parsedFormat: string;
+  mimeType: string;
+  sizeBytes: number;
+  sha256: string;
+  sourceUrl: string;
+  contentSnippet: string;
+  extractedText: string;
+  extractedRows: Record<string, any>[];
+  numericAmounts: number[];
+  sheetNames: string[];
+  discoveredLinks: { label: string; url: string }[];
+  pageCount: number;
+  recordCount: number;
+  createdAt?: any;
+}
+

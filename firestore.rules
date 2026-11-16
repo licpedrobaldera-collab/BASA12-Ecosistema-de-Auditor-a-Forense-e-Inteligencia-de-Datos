@@ -1,0 +1,359 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ==================== PRIMITIVES & IDENTITY ====================
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(ownerUid) {
+      return isVerifiedUser() && ownerUid == request.auth.uid;
+    }
+
+    // ==================== VALIDATION BLUEPRINTS ====================
+    function isValidUserPublic(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'cargo', 'entidadProfesional', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'cargo', 'entidadProfesional', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 160
+        && data.cargo is string && data.cargo.size() <= 120
+        && data.entidadProfesional is string && data.entidadProfesional.size() <= 200
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserPrivate(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'cedulaId', 'colegiatura', 'pais', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'cedulaId', 'colegiatura', 'pais', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && data.email is string && data.email.size() <= 200
+        && data.cedulaId is string && data.cedulaId.size() <= 60
+        && data.colegiatura is string && data.colegiatura.size() <= 100
+        && data.pais is string && data.pais.size() <= 80
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidEntity(data, entityId) {
+      return data.keys().hasAll([
+          'id', 'ownerUid', 'nombre', 'siglas', 'rncNif', 'sector',
+          'paisCodigo', 'moneda', 'simboloMoneda', 'urlPortal', 'descripcion',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerUid', 'nombre', 'siglas', 'rncNif', 'sector',
+          'paisCodigo', 'moneda', 'simboloMoneda', 'urlPortal', 'descripcion',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id) && data.id == entityId
+        && isValidId(data.ownerUid) && data.ownerUid == request.auth.uid
+        && data.nombre is string && data.nombre.size() >= 1 && data.nombre.size() <= 240
+        && data.siglas is string && data.siglas.size() >= 1 && data.siglas.size() <= 32
+        && data.rncNif is string && data.rncNif.size() <= 64
+        && data.sector is string && data.sector.size() <= 160
+        && data.paisCodigo is string && data.paisCodigo.size() >= 2 && data.paisCodigo.size() <= 8
+        && data.moneda is string && data.moneda.size() >= 2 && data.moneda.size() <= 10
+        && data.simboloMoneda is string && data.simboloMoneda.size() >= 1 && data.simboloMoneda.size() <= 10
+        && data.urlPortal is string && data.urlPortal.size() <= 600
+        && data.descripcion is string && data.descripcion.size() <= 12000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidProject(data, projectId) {
+      return data.keys().hasAll([
+          'id', 'ownerUid', 'entityId', 'codigoCaso', 'nombreCaso', 'estado',
+          'requerimiento', 'selloDigital', 'paisNormativa', 'idioma', 'origenes',
+          'entitySnapshot', 'auditorSnapshot', 'periodoSnapshot', 'counts',
+          'contractRows', 'paymentCycleRows', 'observaciones', 'actaLectura',
+          'recursos', 'informePreliminar', 'replicas', 'contraReplicas',
+          'directors', 'preReviewReports', 'matrizHallazgosLiteral',
+          'legalLibrary', 'duplicidades', 'ccrdStages', 'traceabilityLogs',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerUid', 'entityId', 'codigoCaso', 'nombreCaso', 'estado',
+          'requerimiento', 'selloDigital', 'paisNormativa', 'idioma', 'origenes',
+          'entitySnapshot', 'auditorSnapshot', 'periodoSnapshot', 'counts',
+          'evidenceSummary', 'contractRows', 'paymentCycleRows', 'observaciones',
+          'actaLectura', 'recursos', 'informePreliminar', 'replicas', 'contraReplicas',
+          'directors', 'preReviewReports', 'matrizHallazgosLiteral',
+          'legalLibrary', 'duplicidades', 'ccrdStages', 'traceabilityLogs',
+          'resultado', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id) && data.id == projectId
+        && isValidId(data.ownerUid) && data.ownerUid == request.auth.uid
+        && isValidId(data.entityId)
+        && data.codigoCaso is string && data.codigoCaso.size() >= 1 && data.codigoCaso.size() <= 64
+        && data.nombreCaso is string && data.nombreCaso.size() >= 1 && data.nombreCaso.size() <= 240
+        && data.estado is string && data.estado in ['EN_PROCESO', 'DICTAMEN_EMITIDO', 'CERRADO'] && data.estado.size() <= 32
+        && data.requerimiento is string && data.requerimiento.size() <= 15000
+        && data.selloDigital is string && data.selloDigital.size() <= 128
+        && data.paisNormativa is string && data.paisNormativa.size() <= 80
+        && data.idioma is string && data.idioma.size() <= 40
+        && data.origenes is list && data.origenes.size() <= 20
+        && (data.origenes.size() == 0 || data.origenes[0] is string)
+        && data.entitySnapshot is map
+        && data.auditorSnapshot is map
+        && data.periodoSnapshot is map
+        && data.counts is map
+        && (!('evidenceSummary' in data) || data.evidenceSummary == null || data.evidenceSummary is map)
+        && data.contractRows is list && data.contractRows.size() <= 250
+        && (data.contractRows.size() == 0 || data.contractRows[0] is map)
+        && data.paymentCycleRows is list && data.paymentCycleRows.size() <= 250
+        && (data.paymentCycleRows.size() == 0 || data.paymentCycleRows[0] is map)
+        && data.observaciones is list && data.observaciones.size() <= 150
+        && (data.observaciones.size() == 0 || data.observaciones[0] is map)
+        && data.actaLectura is map
+        && data.recursos is list && data.recursos.size() <= 60
+        && (data.recursos.size() == 0 || data.recursos[0] is map)
+        && data.informePreliminar is map
+        && data.replicas is list && data.replicas.size() <= 60
+        && (data.replicas.size() == 0 || data.replicas[0] is map)
+        && data.contraReplicas is list && data.contraReplicas.size() <= 60
+        && (data.contraReplicas.size() == 0 || data.contraReplicas[0] is map)
+        && data.directors is list && data.directors.size() <= 60
+        && (data.directors.size() == 0 || data.directors[0] is map)
+        && data.preReviewReports is map
+        && data.matrizHallazgosLiteral is list && data.matrizHallazgosLiteral.size() <= 250
+        && (data.matrizHallazgosLiteral.size() == 0 || data.matrizHallazgosLiteral[0] is map)
+        && data.legalLibrary is list && data.legalLibrary.size() <= 120
+        && (data.legalLibrary.size() == 0 || data.legalLibrary[0] is map)
+        && data.duplicidades is list && data.duplicidades.size() <= 100
+        && (data.duplicidades.size() == 0 || data.duplicidades[0] is map)
+        && data.ccrdStages is list && data.ccrdStages.size() <= 10
+        && (data.ccrdStages.size() == 0 || data.ccrdStages[0] is map)
+        && data.traceabilityLogs is list && data.traceabilityLogs.size() <= 150
+        && (data.traceabilityLogs.size() == 0 || data.traceabilityLogs[0] is map)
+        && (!('resultado' in data) || data.resultado == null || data.resultado is map)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUpload(data, projectId, uploadId) {
+      return data.keys().hasAll([
+          'id', 'projectId', 'entityId', 'ownerUid', 'fileName', 'sourceType',
+          'parsedFormat', 'mimeType', 'sizeBytes', 'sha256', 'sourceUrl',
+          'contentSnippet', 'extractedText', 'extractedRows', 'numericAmounts',
+          'sheetNames', 'discoveredLinks', 'pageCount', 'recordCount', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'projectId', 'entityId', 'ownerUid', 'fileName', 'sourceType',
+          'parsedFormat', 'mimeType', 'sizeBytes', 'sha256', 'sourceUrl',
+          'contentSnippet', 'extractedText', 'extractedRows', 'numericAmounts',
+          'sheetNames', 'discoveredLinks', 'pageCount', 'recordCount', 'createdAt'
+        ])
+        && isValidId(data.id) && data.id == uploadId
+        && isValidId(data.projectId) && data.projectId == projectId
+        && isValidId(data.entityId)
+        && isValidId(data.ownerUid) && data.ownerUid == request.auth.uid
+        && data.fileName is string && data.fileName.size() >= 1 && data.fileName.size() <= 260
+        && data.sourceType is string && data.sourceType in ['ARCHIVO', 'URL_PORTAL', 'TEXTO_DIRECTO'] && data.sourceType.size() <= 32
+        && data.parsedFormat is string && data.parsedFormat.size() <= 64
+        && data.mimeType is string && data.mimeType.size() <= 120
+        && data.sizeBytes is number && data.sizeBytes >= 0
+        && data.sha256 is string && data.sha256.size() >= 16 && data.sha256.size() <= 128
+        && data.sourceUrl is string && data.sourceUrl.size() <= 800
+        && data.contentSnippet is string && data.contentSnippet.size() <= 2000
+        && data.extractedText is string && data.extractedText.size() <= 350000
+        && data.extractedRows is list && data.extractedRows.size() <= 300
+        && (data.extractedRows.size() == 0 || data.extractedRows[0] is map)
+        && data.numericAmounts is list && data.numericAmounts.size() <= 1000
+        && (data.numericAmounts.size() == 0 || data.numericAmounts[0] is number)
+        && data.sheetNames is list && data.sheetNames.size() <= 30
+        && (data.sheetNames.size() == 0 || data.sheetNames[0] is string)
+        && data.discoveredLinks is list && data.discoveredLinks.size() <= 40
+        && (data.discoveredLinks.size() == 0 || data.discoveredLinks[0] is map)
+        && data.pageCount is number && data.pageCount >= 0
+        && data.recordCount is number && data.recordCount >= 0
+        && data.createdAt is timestamp;
+    }
+
+    function isValidIteration(data, projectId, iterationId) {
+      return data.keys().hasAll([
+          'id', 'projectId', 'ownerUid', 'version', 'autor', 'etapa', 'resumenCambio', 'sha256', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'projectId', 'ownerUid', 'version', 'autor', 'etapa', 'resumenCambio', 'sha256', 'createdAt'
+        ])
+        && isValidId(data.id) && data.id == iterationId
+        && isValidId(data.projectId) && data.projectId == projectId
+        && isValidId(data.ownerUid) && data.ownerUid == request.auth.uid
+        && data.version is number && data.version >= 1
+        && data.autor is string && data.autor.size() <= 160
+        && data.etapa is string && data.etapa.size() <= 40
+        && data.resumenCambio is string && data.resumenCambio.size() <= 600
+        && data.sha256 is string && data.sha256.size() <= 128
+        && data.createdAt is timestamp;
+    }
+
+    // ==================== COLLECTION RULES ====================
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidUserPublic(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && isOwner(existing().uid)
+        && isValidUserPublic(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'cargo', 'entidadProfesional', 'updatedAt']);
+      allow delete: if false;
+
+      match /private/{docId} {
+        allow get: if isValidId(userId) && isValidId(docId) && isOwner(userId);
+        allow list: if false;
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(docId)
+          && docId == 'profile'
+          && isValidUserPrivate(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(docId)
+          && docId == 'profile'
+          && isOwner(existing().uid)
+          && isValidUserPrivate(incoming(), userId)
+          && incoming().uid == existing().uid
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'cedulaId', 'colegiatura', 'pais', 'updatedAt']);
+        allow delete: if false;
+      }
+    }
+
+    match /entities/{entityId} {
+      allow get: if isValidId(entityId) && isOwner(existing().ownerUid);
+      allow list: if isVerifiedUser() && existing().ownerUid == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(entityId)
+        && isValidEntity(incoming(), entityId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(entityId)
+        && isOwner(existing().ownerUid)
+        && isValidEntity(incoming(), entityId)
+        && incoming().id == existing().id
+        && incoming().ownerUid == existing().ownerUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'nombre', 'siglas', 'rncNif', 'sector', 'paisCodigo',
+          'moneda', 'simboloMoneda', 'urlPortal', 'descripcion', 'updatedAt'
+        ]);
+      allow delete: if isValidId(entityId) && isOwner(existing().ownerUid);
+    }
+
+    match /projects/{projectId} {
+      allow get: if isValidId(projectId) && isOwner(existing().ownerUid);
+      allow list: if isVerifiedUser() && existing().ownerUid == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(projectId)
+        && isValidProject(incoming(), projectId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/entities/$(incoming().entityId))
+        && get(/databases/$(database)/documents/entities/$(incoming().entityId)).data.ownerUid == request.auth.uid;
+      allow update: if isVerifiedUser()
+        && isValidId(projectId)
+        && isOwner(existing().ownerUid)
+        && existing().estado != 'CERRADO'
+        && isValidProject(incoming(), projectId)
+        && incoming().id == existing().id
+        && incoming().ownerUid == existing().ownerUid
+        && incoming().entityId == existing().entityId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'codigoCaso', 'nombreCaso', 'estado', 'requerimiento', 'selloDigital',
+            'paisNormativa', 'idioma', 'origenes', 'entitySnapshot', 'auditorSnapshot',
+            'periodoSnapshot', 'counts', 'evidenceSummary', 'contractRows', 'paymentCycleRows',
+            'observaciones', 'actaLectura', 'recursos', 'informePreliminar', 'replicas',
+            'contraReplicas', 'directors', 'preReviewReports', 'matrizHallazgosLiteral',
+            'legalLibrary', 'duplicidades', 'ccrdStages', 'traceabilityLogs', 'resultado', 'updatedAt'
+          ])
+        );
+      allow delete: if isValidId(projectId) && isOwner(existing().ownerUid);
+
+      match /uploads/{uploadId} {
+        allow get: if isValidId(projectId)
+          && isValidId(uploadId)
+          && isOwner(existing().ownerUid)
+          && exists(/databases/$(database)/documents/projects/$(projectId))
+          && get(/databases/$(database)/documents/projects/$(projectId)).data.ownerUid == request.auth.uid;
+        allow list: if isVerifiedUser() && existing().ownerUid == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isValidId(projectId)
+          && isValidId(uploadId)
+          && isValidUpload(incoming(), projectId, uploadId)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/projects/$(projectId))
+          && get(/databases/$(database)/documents/projects/$(projectId)).data.ownerUid == request.auth.uid;
+        allow update: if false;
+        allow delete: if isValidId(projectId)
+          && isValidId(uploadId)
+          && isOwner(existing().ownerUid)
+          && exists(/databases/$(database)/documents/projects/$(projectId))
+          && get(/databases/$(database)/documents/projects/$(projectId)).data.ownerUid == request.auth.uid;
+      }
+
+      match /iterations/{iterationId} {
+        allow get: if isValidId(projectId)
+          && isValidId(iterationId)
+          && isOwner(existing().ownerUid)
+          && exists(/databases/$(database)/documents/projects/$(projectId))
+          && get(/databases/$(database)/documents/projects/$(projectId)).data.ownerUid == request.auth.uid;
+        allow list: if isVerifiedUser() && existing().ownerUid == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isValidId(projectId)
+          && isValidId(iterationId)
+          && isValidIteration(incoming(), projectId, iterationId)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/projects/$(projectId))
+          && get(/databases/$(database)/documents/projects/$(projectId)).data.ownerUid == request.auth.uid;
+        allow update: if false;
+        allow delete: if isValidId(projectId)
+          && isValidId(iterationId)
+          && isOwner(existing().ownerUid)
+          && exists(/databases/$(database)/documents/projects/$(projectId))
+          && get(/databases/$(database)/documents/projects/$(projectId)).data.ownerUid == request.auth.uid;
+      }
+    }
+  }
+}

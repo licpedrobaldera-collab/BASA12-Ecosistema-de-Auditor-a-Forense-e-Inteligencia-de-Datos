@@ -1,11 +1,13 @@
-import React from 'react';
-import { History, X, FolderOpen, Shield, Clock, Eye, Building2 } from 'lucide-react';
-import { CaseSession } from '../types/forensic';
+import React, { useState } from 'react';
+import { History, X, FolderOpen, Shield, Clock, Eye, Building2, Lock } from 'lucide-react';
+import { AuditedEntity, CaseSession } from '../types/forensic';
 
 interface Props {
   isOpen: boolean;
   onClose: () => void;
   cases: CaseSession[];
+  allCases?: CaseSession[];
+  activeEntity?: AuditedEntity | null;
   onSelectCase: (c: CaseSession) => void;
   onViewCaseOnScreen?: (c: CaseSession) => void;
 }
@@ -14,41 +16,72 @@ export const HistoryModal: React.FC<Props> = ({
   isOpen,
   onClose,
   cases,
+  allCases,
+  activeEntity,
   onSelectCase,
   onViewCaseOnScreen,
 }) => {
+  const [scope, setScope] = useState<'entidad' | 'todos'>('entidad');
   if (!isOpen) return null;
+
+  const displayedCases = scope === 'todos' && allCases ? allCases : cases;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 overflow-y-auto">
       <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl max-w-3xl w-full max-h-[85vh] flex flex-col text-slate-100 overflow-hidden">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-950">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-950 gap-3 flex-wrap">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-lg bg-sky-500/20 text-sky-400 flex items-center justify-center font-bold">
               <History className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-lg font-bold text-white">Histórico de Casos y Expedientes Forenses</h2>
-              <p className="text-xs text-slate-400">Base de datos persistente por entidad y sellos criptográficos</p>
+              <h2 className="text-lg font-bold text-white">Histórico de Proyectos y Expedientes Forenses</h2>
+              <p className="text-xs text-slate-400">Base de datos Firestore en la nube con sellos criptográficos SHA-256</p>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="text-slate-400 hover:text-white p-1 rounded-md hover:bg-slate-800 transition-colors cursor-pointer"
-          >
-            <X className="w-5 h-5" />
-          </button>
+
+          <div className="flex items-center gap-2">
+            {allCases && activeEntity && (
+              <div className="flex items-center bg-slate-900 border border-slate-800 rounded-lg p-0.5 text-[11px]">
+                <button
+                  type="button"
+                  onClick={() => setScope('entidad')}
+                  className={`px-2.5 py-1 rounded-md cursor-pointer font-semibold ${
+                    scope === 'entidad' ? 'bg-sky-600/30 text-sky-300' : 'text-slate-400'
+                  }`}
+                >
+                  {activeEntity.siglas} ({cases.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setScope('todos')}
+                  className={`px-2.5 py-1 rounded-md cursor-pointer font-semibold ${
+                    scope === 'todos' ? 'bg-sky-600/30 text-sky-300' : 'text-slate-400'
+                  }`}
+                >
+                  Todos ({allCases.length})
+                </button>
+              </div>
+            )}
+
+            <button
+              onClick={onClose}
+              className="text-slate-400 hover:text-white p-1 rounded-md hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* Content */}
         <div className="p-6 overflow-y-auto flex-1 space-y-3">
-          {cases.length === 0 ? (
+          {displayedCases.length === 0 ? (
             <div className="text-center py-12 text-slate-500 text-sm">
-              No hay casos guardados en el histórico todavía.
+              No hay proyectos guardados en esta vista todavía.
             </div>
           ) : (
-            cases.map((cs) => (
+            displayedCases.map((cs) => (
               <div
                 key={cs.id}
                 className="bg-slate-950 border border-slate-800 hover:border-sky-500/50 p-4 rounded-lg transition-all space-y-2.5"
@@ -68,6 +101,12 @@ export const HistoryModal: React.FC<Props> = ({
                         {cs.entity.siglas}
                       </span>
                     )}
+                    {cs.estado === 'CERRADO' && (
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30 flex items-center gap-1">
+                        <Lock className="w-3 h-3" />
+                        CERRADO
+                      </span>
+                    )}
                   </div>
                   <span className="text-[11px] text-slate-500 font-mono flex items-center gap-1">
                     <Clock className="w-3 h-3" />
@@ -80,11 +119,15 @@ export const HistoryModal: React.FC<Props> = ({
                 <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] pt-2 border-t border-slate-800/80">
                   <div className="flex items-center gap-3">
                     <span className="text-slate-500">
-                      Fuentes: <strong className="text-slate-300">{cs.origenes.join(', ')}</strong>
+                      Métricas:{' '}
+                      <strong className="text-slate-300">
+                        {cs.contractRows?.length || 0} contr. • {cs.paymentCycleRows?.length || 0} pagos •{' '}
+                        {cs.matrizHallazgosLiteral?.length || 0} hall.
+                      </strong>
                     </span>
                     <span className="text-emerald-400 font-mono flex items-center gap-1">
                       <Shield className="w-3 h-3" />
-                      {cs.selloDigital.substring(0, 10)}...
+                      {(cs.selloDigital || 'N/A').substring(0, 10)}...
                     </span>
                   </div>
 

@@ -2029,6 +2029,59 @@ function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
   return union > 0 ? inter / union : 0;
 }
 
+// Deterministic helper for specific normative articles ("Criterio: Lo que debe ser")
+function inferGranularCriteria(txt: string): { criterioTexto: string; leyesCitadas: any[] } {
+  const low = txt.toLowerCase();
+  const cites: any[] = [];
+  const parts: string[] = [];
+
+  if (low.includes('pacc') || low.includes('plan anual') || low.includes('compra') || low.includes('contrat')) {
+    cites.push(
+      { norma: 'Ley núm. 340-06', articulo: 'Arts. 32 y 33 (Umbrales, pluralidad y PACC)', jerarquia: 'LEY' },
+      { norma: 'Decreto núm. 543-12', articulo: 'Art. 31 (Publicación y plazos del PACC)', jerarquia: 'DECRETO' },
+      { norma: 'NOBACI ADC-03-004.19', articulo: 'Controles de Compras y Recepciones', jerarquia: 'RESOLUCION_NOBACI' }
+    );
+    parts.push('Lo que debe ser: Todo proceso de adquisición debe estar programado en el PACC publicado oportunamente (Ley 340-06 Art. 33; Decreto 543-12 Art. 31) y cumplir umbrales y pluralidad de oferentes (Ley 340-06 Art. 32; NOBACI ADC-03-004.19).');
+  }
+  if (low.includes('personal') || low.includes('rr. hh') || low.includes('recurso humano') || low.includes('nómina') || low.includes('nomina') || low.includes('desempe') || low.includes('cargo')) {
+    cites.push(
+      { norma: 'Ley núm. 41-08', articulo: 'Art. 8 num. 12 y Art. 50 (Manuales MAP y Evaluaciones)', jerarquia: 'LEY' },
+      { norma: 'Ley núm. 311-14', articulo: 'Arts. 1 y 2 (Declaración Jurada de Patrimonio)', jerarquia: 'LEY' },
+      { norma: 'Decreto núm. 527-09', articulo: 'Art. 3 (Estructura Organizativa)', jerarquia: 'DECRETO' },
+      { norma: 'NOBACI ADC-3-006', articulo: 'Nums. 4, 20, 33 y 86 (Control Interno RR. HH.)', jerarquia: 'RESOLUCION_NOBACI' }
+    );
+    parts.push('Lo que debe ser: Contar con estructura organizativa y manual de cargos aprobados por el MAP (Ley 41-08 Art. 8 num. 12; Decreto 527-09 Art. 3), evaluaciones anuales (Art. 50), expedientes completos con Declaración Jurada (Ley 311-14) y controles NOBACI ADC-3-006.');
+  }
+  if (low.includes('activo') || low.includes('inventario') || low.includes('almac')) {
+    cites.push(
+      { norma: 'NOBACI ADC-3-001.3', articulo: 'Control de Inventarios y Activos Fijos', jerarquia: 'RESOLUCION_NOBACI' },
+      { norma: 'Ley núm. 10-04', articulo: 'Arts. 10 y 38 (Control Interno e Inventarios)', jerarquia: 'LEY' }
+    );
+    parts.push('Lo que debe ser: Registro físico codificado, conciliación periódica de inventarios y custodia patrimonial formal (NOBACI / NOBIS Activos Fijos y ADC-3-001.3).');
+  }
+  if (low.includes('concilia') || low.includes('banco') || low.includes('tesorer') || low.includes('pago') || low.includes('viático') || low.includes('viatico')) {
+    cites.push(
+      { norma: 'Ley núm. 18-24', articulo: 'Arts. 10, 25 y 38 (Fiscalización CCRD)', jerarquia: 'LEY' },
+      { norma: 'Normas Básicas de Tesorería', articulo: 'Conciliación y Doble Visado', jerarquia: 'RESOLUCION_NOBACI' }
+    );
+    parts.push('Lo que debe ser: Conciliaciones bancarias mensuales sin partidas flotantes vencidas, control previo y autorización dual en pagos y liquidación de viáticos (Ley 18-24 Art. 10; Normas de Tesorería).');
+  }
+  if (low.includes('ambient') || low.includes('residuo')) {
+    cites.push({ norma: 'Ley núm. 64-00', articulo: 'Arts. 40 y 41 (Permisos Ambientales)', jerarquia: 'LEY' });
+    parts.push('Lo que debe ser: Mantener permisos ambientales vigentes y manifiestos trazables conforme a la Ley núm. 64-00.');
+  }
+  if (cites.length === 0) {
+    cites.push(
+      { norma: 'Ley núm. 18-24', articulo: 'Arts. 10, 25 y 38 (CCRD)', jerarquia: 'LEY' },
+      { norma: 'Ley núm. 498-06', articulo: 'Arts. 24 y 25 lit. d (Planificación)', jerarquia: 'LEY' },
+      { norma: 'Normas NOBACI / CGR', articulo: 'Ambiente de Control y Evidencia', jerarquia: 'RESOLUCION_NOBACI' }
+    );
+    parts.push('Lo que debe ser: Cumplimiento estricto del principio de legalidad y control interno institucional bajo la Ley núm. 18-24 (Arts. 10, 25 y 38), Ley 498-06 (Arts. 24-25.d) y Normas Básicas de Control Interno (NOBACI).');
+  }
+
+  return { criterioTexto: parts.join(' '), leyesCitadas: cites };
+}
+
 app.post('/api/forensic/extract-hallazgos-ccrd', async (req, res) => {
   try {
     const {
@@ -2074,59 +2127,6 @@ app.post('/api/forensic/extract-hallazgos-ccrd', async (req, res) => {
         });
       }
     }
-
-    // Deterministic helper for specific normative articles ("Criterio: Lo que debe ser")
-    const inferGranularCriteria = (txt: string): { criterioTexto: string; leyesCitadas: any[] } => {
-      const low = txt.toLowerCase();
-      const cites: any[] = [];
-      const parts: string[] = [];
-
-      if (low.includes('pacc') || low.includes('plan anual') || low.includes('compra') || low.includes('contrat')) {
-        cites.push(
-          { norma: 'Ley núm. 340-06', articulo: 'Arts. 32 y 33 (Umbrales, pluralidad y PACC)', jerarquia: 'LEY' },
-          { norma: 'Decreto núm. 543-12', articulo: 'Art. 31 (Publicación y plazos del PACC)', jerarquia: 'DECRETO' },
-          { norma: 'NOBACI ADC-03-004.19', articulo: 'Controles de Compras y Recepciones', jerarquia: 'RESOLUCION_NOBACI' }
-        );
-        parts.push('Lo que debe ser: Todo proceso de adquisición debe estar programado en el PACC publicado oportunamente (Ley 340-06 Art. 33; Decreto 543-12 Art. 31) y cumplir umbrales y pluralidad de oferentes (Ley 340-06 Art. 32; NOBACI ADC-03-004.19).');
-      }
-      if (low.includes('personal') || low.includes('rr. hh') || low.includes('recurso humano') || low.includes('nómina') || low.includes('nomina') || low.includes('desempe') || low.includes('cargo')) {
-        cites.push(
-          { norma: 'Ley núm. 41-08', articulo: 'Art. 8 num. 12 y Art. 50 (Manuales MAP y Evaluaciones)', jerarquia: 'LEY' },
-          { norma: 'Ley núm. 311-14', articulo: 'Arts. 1 y 2 (Declaración Jurada de Patrimonio)', jerarquia: 'LEY' },
-          { norma: 'Decreto núm. 527-09', articulo: 'Art. 3 (Estructura Organizativa)', jerarquia: 'DECRETO' },
-          { norma: 'NOBACI ADC-3-006', articulo: 'Nums. 4, 20, 33 y 86 (Control Interno RR. HH.)', jerarquia: 'RESOLUCION_NOBACI' }
-        );
-        parts.push('Lo que debe ser: Contar con estructura organizativa y manual de cargos aprobados por el MAP (Ley 41-08 Art. 8 num. 12; Decreto 527-09 Art. 3), evaluaciones anuales (Art. 50), expedientes completos con Declaración Jurada (Ley 311-14) y controles NOBACI ADC-3-006.');
-      }
-      if (low.includes('activo') || low.includes('inventario') || low.includes('almac')) {
-        cites.push(
-          { norma: 'NOBACI ADC-3-001.3', articulo: 'Control de Inventarios y Activos Fijos', jerarquia: 'RESOLUCION_NOBACI' },
-          { norma: 'Ley núm. 10-04', articulo: 'Arts. 10 y 38 (Control Interno e Inventarios)', jerarquia: 'LEY' }
-        );
-        parts.push('Lo que debe ser: Registro físico codificado, conciliación periódica de inventarios y custodia patrimonial formal (NOBACI / NOBIS Activos Fijos y ADC-3-001.3).');
-      }
-      if (low.includes('concilia') || low.includes('banco') || low.includes('tesorer') || low.includes('pago') || low.includes('viático') || low.includes('viatico')) {
-        cites.push(
-          { norma: 'Ley núm. 18-24', articulo: 'Arts. 10, 25 y 38 (Fiscalización CCRD)', jerarquia: 'LEY' },
-          { norma: 'Normas Básicas de Tesorería', articulo: 'Conciliación y Doble Visado', jerarquia: 'RESOLUCION_NOBACI' }
-        );
-        parts.push('Lo que debe ser: Conciliaciones bancarias mensuales sin partidas flotantes vencidas, control previo y autorización dual en pagos y liquidación de viáticos (Ley 18-24 Art. 10; Normas de Tesorería).');
-      }
-      if (low.includes('ambient') || low.includes('residuo')) {
-        cites.push({ norma: 'Ley núm. 64-00', articulo: 'Arts. 40 y 41 (Permisos Ambientales)', jerarquia: 'LEY' });
-        parts.push('Lo que debe ser: Mantener permisos ambientales vigentes y manifiestos trazables conforme a la Ley núm. 64-00.');
-      }
-      if (cites.length === 0) {
-        cites.push(
-          { norma: 'Ley núm. 18-24', articulo: 'Arts. 10, 25 y 38 (CCRD)', jerarquia: 'LEY' },
-          { norma: 'Ley núm. 498-06', articulo: 'Arts. 24 y 25 lit. d (Planificación)', jerarquia: 'LEY' },
-          { norma: 'Normas NOBACI / CGR', articulo: 'Ambiente de Control y Evidencia', jerarquia: 'RESOLUCION_NOBACI' }
-        );
-        parts.push('Lo que debe ser: Cumplimiento estricto del principio de legalidad y control interno institucional bajo la Ley núm. 18-24 (Arts. 10, 25 y 38), Ley 498-06 (Arts. 24-25.d) y Normas Básicas de Control Interno (NOBACI).');
-      }
-
-      return { criterioTexto: parts.join(' '), leyesCitadas: cites };
-    };
 
     const ai = getAiClient();
     let aiHallazgos: any[] = [];
@@ -2267,6 +2267,31 @@ Devuelve JSON estricto con esta estructura:
             })
         : rawSourceList;
 
+    const inferStageNum = (h: any): 1 | 2 | 3 | 4 => {
+      const explicit = Number(h?.etapaCcrd);
+      if (explicit === 1 || explicit === 2 || explicit === 3 || explicit === 4) return explicit;
+      const ref = String(h?.referenciaExacta || '').toLowerCase();
+      if (/etapa\s*1\b/.test(ref)) return 1;
+      if (/etapa\s*2\b/.test(ref)) return 2;
+      if (/etapa\s*3\b/.test(ref)) return 3;
+      if (/etapa\s*4\b/.test(ref)) return 4;
+
+      const factBlob = `${h?.titulo || ''} ${h?.condicionLiteral || ''}`.toLowerCase();
+      if (/acta de lectura|recurso|r[eé]plica|contra-r[eé]plica|descargo|comunicaci[oó]n de hallazgo|debido proceso/.test(factBlob)) {
+        return 3;
+      }
+      if (/informe final|seguimiento a recomendaci|cierre de auditor|dictamen final|revisi[oó]n previa/.test(factBlob)) {
+        return 4;
+      }
+      if (/planificaci[oó]n estrat|\bpei\b|\bpacc\b|plan anual de compras|manual de cargos|manual de procedimientos|estructura organizativa|organigrama|acreditaci[oó]n|credencial/.test(factBlob)) {
+        return 1;
+      }
+      if (/conciliaci|tesorer|banco|pago|libramiento|orden de compra|recepci[oó]n|almac[eé]n|inventario|activo fijo|n[oó]mina|vi[aá]tico|obra|contrato|adenda|factura|e-cf|combustible|flota|acceso l[oó]gico|respaldo/.test(factBlob)) {
+        return 2;
+      }
+      return 2;
+    };
+
     const normalized = fallbackParagraphs.map((h: any, idx: number) => {
       const hLevel = String(h.jerarquiaCriterio || 'LEY').toUpperCase();
       const order = HIERARCHY_ORDER[hLevel] || 3;
@@ -2296,6 +2321,7 @@ Devuelve JSON estricto con esta estructura:
         entregable: String(h.entregable || ''),
         leyesCitadas: Array.isArray(h.leyesCitadas) ? h.leyesCitadas : [],
         origenDocumento: informePreliminarText ? 'Informe Preliminar / Documento Cargado' : 'Evidencia Digital',
+        etapaCcrd: inferStageNum(h),
       };
     });
 
@@ -2389,7 +2415,7 @@ Devuelve JSON estricto:
   "jerarquiaCriterio": "LEY | DECRETO | RESOLUCION_NOBACI | NORMATIVA_INTERNA",
   "causa": "Causa administrativa/operativa subyacente.",
   "efecto": "Consecuencia o impacto institucional/patrimonial.",
-  "recomendacionSupervisor": "Recomendación técnica de supervisión para subsanar el hallazgo.",
+  "recomendacionSupervisor": "Recomendación de auditoría estilo CCRD en exactamente 1 párrafo corto (60 a 90 palabras), dirigido al titular/MAE, iniciando con 'Instruir a...' señalando departamentos competentes, acción concreta de control y cerrando con la base legal citada en el criterio.",
   "planAccionCorrectivo": "Pasos concretos enumerados para lograr aprobación del MAP y la CGR.",
   "responsableArea": "RR. HH. | Planificación | Compras | Almacén | Dirección General",
   "entregable": "Manuales, políticas o formularios específicos requeridos",
@@ -2409,6 +2435,117 @@ Devuelve JSON estricto:
   } catch (error: any) {
     console.error('Error in /api/forensic/evaluate-nobaci-hallazgo:', error);
     res.status(500).json({ success: false, error: error.message || 'Error evaluando hallazgo bajo marco NOBACI/CGR.' });
+  }
+});
+
+// =========================================================================
+// AUDITOR CCRD RECOMMENDATION GENERATOR (STRICT 1 PARAGRAPH, 60-90 WORDS)
+// =========================================================================
+app.post('/api/forensic/generate-ccrd-recommendation', async (req, res) => {
+  try {
+    const ai = getAiClient();
+    if (!ai) {
+      return res.status(503).json({ success: false, error: 'Servicio de generación no disponible en el servidor.' });
+    }
+
+    const {
+      entidad = '',
+      condicion = '',
+      criterio = '',
+      causaComentario = '',
+      efecto = '',
+      conclusion = '',
+      idHallazgo = '',
+    } = req.body || {};
+
+    if (!String(condicion).trim() && !String(criterio).trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Debe suministrar al menos la Condición o el Criterio del hallazgo para redactar la recomendación CCRD.',
+      });
+    }
+
+    const cleanInputs = {
+      entidad: anonymizeText(String(entidad || 'Entidad Pública Auditada').trim()),
+      condicion: anonymizeText(String(condicion || 'No especificada').trim()),
+      criterio: anonymizeText(String(criterio || 'No especificado').trim()),
+      causaComentario: anonymizeText(String(causaComentario || 'No especificada').trim()),
+      efecto: anonymizeText(String(efecto || 'No especificado').trim()),
+      conclusion: anonymizeText(String(conclusion || 'No especificada').trim()),
+    };
+
+    const buildPrompt = (revisionInfo?: { currentText: string; currentCount: number }) => `
+Actúa como Auditor de la Cámara de Cuentas de la República Dominicana (CCRD). Redacta una Recomendación de Auditoría breve, clara, precisa y accionable a partir del hallazgo suministrado.
+
+CRITERIOS DE REDACCIÓN OBLIGATORIOS (ESTILO CCRD):
+- Extensión ESTRICTA: Exactamente 1 solo párrafo corto entre 60 y 90 palabras. Sin saltos de línea, sin títulos, sin viñetas, sin rodeos ni texto de relleno.
+- Estructura obligatoria integrada en ese único párrafo:
+  1. Destinatario: Dirigido al titular o Máxima Autoridad Ejecutiva (MAE) de la entidad (${cleanInputs.entidad}).
+  2. Instrucción y responsables: Iniciar la redacción literalmente con el verbo "Instruir a..." mencionando expresamente al titular o Máxima Autoridad Ejecutiva (MAE) (por ejemplo: "Instruir a [departamentos competentes], por disposición del titular o Máxima Autoridad Ejecutiva (MAE) de ${cleanInputs.entidad}, a...") señalando los departamentos internos competentes según la normativa (Compras, OAI, Financiero, Planificación, RR. HH., Contabilidad, Jurídica, Almacén, etc.).
+  3. Acción de control: Indicar la medida concreta de control o supervisión para corregir la deficiencia y evitar su recurrencia.
+  4. Base legal: Cerrar vinculando expresamente el cumplimiento con las leyes, decretos o resoluciones citadas en el Criterio suministrado.
+- Estilo: Tono técnico, imperativo, objetivo e impersonal.
+- Prohibición estricta: NO inventar normas, artículos, decretos, montos ni hechos fuera del texto entregado. NUNCA mencionar "IA", "inteligencia artificial" ni modelos tecnológicos.
+- Responde ÚNICAMENTE con el texto plano del párrafo final, sin comillas ni encabezados.
+
+INSUMOS DEL HALLAZGO:
+* Entidad: ${cleanInputs.entidad}
+* Condición: ${cleanInputs.condicion}
+* Criterio: ${cleanInputs.criterio}
+* Causa / Comentario de la entidad: ${cleanInputs.causaComentario}
+* Efecto: ${cleanInputs.efecto}
+* Conclusión: ${cleanInputs.conclusion}
+${
+  revisionInfo
+    ? `\nAJUSTE DE EXTENSIÓN REQUERIDO: El borrador anterior tuvo ${revisionInfo.currentCount} palabras ("${revisionInfo.currentText}"). Reescríbelo manteniendo exactamente los 4 elementos obligatorios y las mismas normas del criterio, pero logrando estrictamente entre 65 y 85 palabras en un solo párrafo que inicie con "Instruir a...".`
+    : ''
+}
+`;
+
+    const normalizeParagraph = (txt: string) =>
+      txt
+        .replace(/^```[\s\S]*?\n|```$/g, '')
+        .replace(/^["'«»]+|["'«»]+$/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const countWords = (txt: string) => (txt ? txt.split(/\s+/).filter(Boolean).length : 0);
+
+    const firstPass = await callGeminiWithResilience(ai, {
+      contents: buildPrompt(),
+      config: { temperature: 0.2 },
+    });
+
+    let modelUsed = firstPass.modelUsed;
+    let recomendacion = normalizeParagraph(firstPass.response.text || '');
+    let wordCount = countWords(recomendacion);
+
+    if (wordCount < 58 || wordCount > 92 || !/^instruir\s+a\b/i.test(recomendacion)) {
+      const secondPass = await callGeminiWithResilience(ai, {
+        contents: buildPrompt({ currentText: recomendacion, currentCount: wordCount }),
+        config: { temperature: 0.15 },
+      });
+      const refined = normalizeParagraph(secondPass.response.text || '');
+      if (refined) {
+        recomendacion = refined;
+        wordCount = countWords(recomendacion);
+        modelUsed = secondPass.modelUsed;
+      }
+    }
+
+    res.json({
+      success: true,
+      modelUsed,
+      idHallazgo,
+      recomendacion,
+      wordCount,
+    });
+  } catch (error: any) {
+    console.error('Error in /api/forensic/generate-ccrd-recommendation:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Error generando la recomendación de auditoría estilo CCRD.',
+    });
   }
 });
 
@@ -2686,6 +2823,319 @@ Devuelve JSON dentro de \`\`\`json ... \`\`\`:
   } catch (error: any) {
     console.error('Error in /api/forensic/build-legal-library:', error);
     res.status(500).json({ success: false, error: error.message || 'Error construyendo la Biblioteca Virtual Legal.' });
+  }
+});
+
+// =========================================================================
+// INTEGRAL FULL-AUDIT AI REMEDIATION (CORREGIR FALLAS Y ELEVAR BLINDAJE 100/100)
+// =========================================================================
+app.post('/api/forensic/remediate-integral', async (req, res) => {
+  try {
+    const ai = getAiClient();
+    const {
+      entity = null,
+      paisNormativa = 'República Dominicana',
+      periodo = {},
+      hallazgos = [],
+      observaciones = [],
+      ccrdStages = [],
+      duplicidades = [],
+      directors = [],
+      legalLibrary = [],
+      contractRows = [],
+      paymentCycleRows = [],
+      actaLectura = null,
+      informePreliminar = null,
+      recursos = [],
+      replicas = [],
+      contraReplicas = [],
+      preReviewReports = {},
+    } = req.body || {};
+
+    const inferStage = (h: any): 1 | 2 | 3 | 4 => {
+      const explicit = Number(h?.etapaCcrd);
+      if (explicit === 1 || explicit === 2 || explicit === 3 || explicit === 4) return explicit;
+      const ref = String(h?.referenciaExacta || '').toLowerCase();
+      if (/etapa\s*1\b/.test(ref)) return 1;
+      if (/etapa\s*2\b/.test(ref)) return 2;
+      if (/etapa\s*3\b/.test(ref)) return 3;
+      if (/etapa\s*4\b/.test(ref)) return 4;
+
+      const factBlob = `${h?.titulo || ''} ${h?.condicionLiteral || ''}`.toLowerCase();
+      if (/acta de lectura|recurso|r[eé]plica|contra-r[eé]plica|descargo|comunicaci[oó]n de hallazgo|debido proceso/.test(factBlob)) {
+        return 3;
+      }
+      if (/informe final|seguimiento a recomendaci|cierre de auditor|dictamen final|revisi[oó]n previa/.test(factBlob)) {
+        return 4;
+      }
+      if (/planificaci[oó]n estrat|\bpei\b|\bpacc\b|plan anual de compras|manual de cargos|manual de procedimientos|estructura organizativa|organigrama|acreditaci[oó]n|credencial/.test(factBlob)) {
+        return 1;
+      }
+      if (/conciliaci|tesorer|banco|pago|libramiento|orden de compra|recepci[oó]n|almac[eé]n|inventario|activo fijo|n[oó]mina|vi[aá]tico|obra|contrato|adenda|factura|e-cf|combustible|flota|acceso l[oó]gico|respaldo/.test(factBlob)) {
+        return 2;
+      }
+      return 2;
+    };
+
+    const brechasPendientes: string[] = [];
+    const correccionesAplicadas: string[] = [];
+
+    if (!entity?.nombre) {
+      brechasPendientes.push('Registrar la Entidad Pública Real (Nombre, Siglas y RNC) en el Paso 1.');
+    }
+    if (directors.length === 0) {
+      brechasPendientes.push('Cargar o buscar al menos 1 Director/Titular con decreto de nombramiento en el Paso 4.');
+    } else if (directors.some((d: any) => !d.fuentes || d.fuentes.length === 0)) {
+      brechasPendientes.push('Vincular fuente URL o fragmento oficial al decreto de cada titular para blindar responsabilidad.');
+    }
+    if (!actaLectura?.contenido || String(actaLectura.contenido).trim().length < 30) {
+      brechasPendientes.push('Documentar el Acta de Lectura de Hallazgos en el Paso 4 (Etapa 3 Guía CCRD).');
+    }
+    if (duplicidades.some((d: any) => !d.incluidoEnObservaciones)) {
+      brechasPendientes.push('Resolver o consolidar las duplicidades detectadas en la Matriz CCRD.');
+    }
+
+    let remediatedHallazgos = [...hallazgos];
+    let modelUsed = 'motor-deterministico-ccrd';
+    let resumenEjecutivoIA = '';
+
+    if (ai && hallazgos.length > 0) {
+      const compactHallazgos = hallazgos.slice(0, 60).map((h: any) => ({
+        id: h.id,
+        idHallazgo: h.idHallazgo,
+        titulo: h.titulo,
+        estado: h.estado,
+        nivelRiesgo: h.nivelRiesgo,
+        puntaje0a10: h.puntaje0a10,
+        condicionLiteral: String(h.condicionLiteral || '').slice(0, 800),
+        criterioTexto: String(h.criterioTexto || '').slice(0, 500),
+        causa: String(h.causa || '').slice(0, 400),
+        efecto: String(h.efecto || '').slice(0, 400),
+        recomendacionSupervisor: String(h.recomendacionSupervisor || '').slice(0, 500),
+        planAccionCorrectivo: String(h.planAccionCorrectivo || '').slice(0, 400),
+        responsableArea: h.responsableArea,
+        entregable: h.entregable,
+        etapaCcrd: inferStage(h),
+        leyesCitadas: h.leyesCitadas || [],
+      }));
+
+      const promptText = `
+Actúa como Auditor Gubernamental Senior de la Cámara de Cuentas (CCRD) y Revisor Técnico de Calidad (Ley núm. 18-24, Ley 41-08, Decreto 527-09, Ley 498-06, Decreto 543-12 y NOBACI 3).
+NUNCA menciones "IA", "inteligencia artificial" ni "Gemini" en ningún texto generado para el informe o recomendaciones.
+NO inventes hechos ni cifras nuevas fuera de los hallazgos suministrados.
+
+Entidad Auditada: ${entity?.nombre || 'Entidad Pública'} | Jurisdicción: ${paisNormativa} | Período: ${periodo?.fechaDesde || 'N/D'} a ${periodo?.fechaHasta || 'N/D'}
+Observaciones formales registradas: ${observaciones.length} | Contratos: ${contractRows.length} | Pagos: ${paymentCycleRows.length} | Directores: ${directors.length}
+
+TAREA INTEGRAL DE SUBSANACIÓN TÉCNICA DE HALLAZGOS:
+Para cada hallazgo recibido en la lista JSON, corrige y eleva su calidad técnica sin alterar el hecho real de "condicionLiteral":
+1. Asigna "etapaCcrd" exacto (1=Planificación y Análisis, 2=Ejecución, 3=Comunicación de Hallazgos, 4=Conclusión e Informe Final).
+2. Verifica "jerarquiaCriterio" estricto (CONSTITUCION | TRATADOS_ISSAI_NIA | LEY | DECRETO | RESOLUCION_NOBACI | NORMATIVA_INTERNA) y completa "criterioTexto" con el formato "Lo que debe ser: ..." citando artículos y normas puntuales reales aplicables de República Dominicana (o ${paisNormativa}).
+3. Completa o fortalece "causa", "efecto", "planAccionCorrectivo", "responsableArea", "entregable" y "leyesCitadas" si están vacíos o genéricos.
+4. Reescribe "recomendacionSupervisor" estrictamente en formato CCRD: exactamente 1 párrafo corto entre 60 y 90 palabras, dirigido al titular o Máxima Autoridad Ejecutiva (MAE) de ${entity?.nombre || 'la entidad'}, iniciando literalmente con "Instruir a..." señalando departamentos competentes, acción concreta de control y cerrando con la base legal citada en el criterio.
+
+Hallazgos actuales (${compactHallazgos.length}):
+${JSON.stringify(compactHallazgos, null, 2)}
+
+Devuelve JSON estricto:
+{
+  "resumenEjecutivo": "Diagnóstico técnico breve de las correcciones aplicadas al expediente y nivel de preparación para remisión oficial.",
+  "correccionesAplicadas": ["Lista breve de mejoras técnicas aplicadas a criterios, recomendaciones CCRD, jerarquía legal y asignación por etapas"],
+  "hallazgosCorregidos": [
+    {
+      "id": "mismo id recibido",
+      "etapaCcrd": 2,
+      "jerarquiaCriterio": "LEY",
+      "criterioTexto": "Lo que debe ser: ...",
+      "causa": "...",
+      "efecto": "...",
+      "recomendacionSupervisor": "Instruir a ...",
+      "planAccionCorrectivo": "...",
+      "responsableArea": "...",
+      "entregable": "...",
+      "leyesCitadas": [{ "norma": "...", "articulo": "...", "jerarquia": "LEY" }]
+    }
+  ]
+}
+`;
+      try {
+        const aiRes = await callGeminiWithResilience(ai, {
+          contents: promptText,
+          config: { responseMimeType: 'application/json', temperature: 0.2 },
+        });
+        modelUsed = aiRes.modelUsed;
+        const parsed = parseJsonSafe<any>(aiRes.response.text || '{}', {});
+        resumenEjecutivoIA = String(parsed.resumenEjecutivo || '');
+        if (Array.isArray(parsed.correccionesAplicadas)) {
+          parsed.correccionesAplicadas.forEach((c: any) => {
+            if (c) correccionesAplicadas.push(String(c));
+          });
+        }
+        const byId = new Map<string, any>();
+        if (Array.isArray(parsed.hallazgosCorregidos)) {
+          parsed.hallazgosCorregidos.forEach((hc: any) => {
+            if (hc?.id) byId.set(String(hc.id), hc);
+          });
+        }
+
+        remediatedHallazgos = hallazgos.map((orig: any) => {
+          const patch = byId.get(String(orig.id));
+          const mergedCriterio = patch?.criterioTexto || orig.criterioTexto || inferGranularCriteria(`${orig.titulo} ${orig.condicionLiteral}`).criterioTexto;
+          const jer = HIERARCHY_ORDER[String(patch?.jerarquiaCriterio || orig.jerarquiaCriterio || '').toUpperCase()]
+            ? String(patch?.jerarquiaCriterio || orig.jerarquiaCriterio).toUpperCase()
+            : inferHierarchy(mergedCriterio).level;
+
+          const rec = String(patch?.recomendacionSupervisor || orig.recomendacionSupervisor || '')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+          return {
+            ...orig,
+            etapaCcrd: inferStage({ ...orig, etapaCcrd: patch?.etapaCcrd }),
+            jerarquiaCriterio: jer,
+            jerarquiaOrden: HIERARCHY_ORDER[jer] || 3,
+            criterioTexto: mergedCriterio,
+            causa: patch?.causa || orig.causa || 'Debilidad en la supervisión operativa y ausencia de controles preventivos documentados.',
+            efecto: patch?.efecto || orig.efecto || 'Exposición institucional al incumplimiento del marco legal y control interno.',
+            recomendacionSupervisor: rec || orig.recomendacionSupervisor,
+            planAccionCorrectivo: patch?.planAccionCorrectivo || orig.planAccionCorrectivo || 'Implementar procedimiento formal y evidencia verificable ante OAI y CGR.',
+            responsableArea: patch?.responsableArea || orig.responsableArea || 'Dirección Administrativa / Área Competente',
+            entregable: patch?.entregable || orig.entregable || 'Evidencia de subsanación y manual aprobado',
+            leyesCitadas: Array.isArray(patch?.leyesCitadas) && patch.leyesCitadas.length > 0 ? patch.leyesCitadas : orig.leyesCitadas,
+          };
+        });
+      } catch (aiErr) {
+        console.warn('remediate-integral fallback deterministic:', aiErr);
+      }
+    }
+
+    // Deterministic polish for any remaining hallazgos (including when hallazgos <= 0 or AI patch skipped)
+    remediatedHallazgos = remediatedHallazgos.map((h: any) => {
+      const crit = !h.criterioTexto ? inferGranularCriteria(`${h.titulo} ${h.condicionLiteral}`) : null;
+      const jer = HIERARCHY_ORDER[String(h.jerarquiaCriterio || '').toUpperCase()]
+        ? String(h.jerarquiaCriterio).toUpperCase()
+        : inferHierarchy(h.criterioTexto || h.condicionLiteral || '').level;
+      return {
+        ...h,
+        etapaCcrd: inferStage(h),
+        jerarquiaCriterio: jer,
+        jerarquiaOrden: HIERARCHY_ORDER[jer] || 3,
+        criterioTexto: h.criterioTexto || crit?.criterioTexto || 'Lo que debe ser: Ley núm. 18-24 y Normas Básicas de Control Interno (NOBACI).',
+        leyesCitadas: Array.isArray(h.leyesCitadas) && h.leyesCitadas.length > 0 ? h.leyesCitadas : crit?.leyesCitadas || [],
+      };
+    });
+
+    if (remediatedHallazgos.length > 0 && correccionesAplicadas.length === 0) {
+      correccionesAplicadas.push(
+        `Normalizados ${remediatedHallazgos.length} hallazgo(s) con clasificación jerárquica legal, etapa Guía CCRD (1–4) y criterios puntuales.`
+      );
+    }
+
+    // Recompute 4 CCRD Stages accurately
+    const hasDocs =
+      hallazgos.length > 0 ||
+      contractRows.length > 0 ||
+      paymentCycleRows.length > 0 ||
+      Boolean(informePreliminar?.contenido?.trim());
+    const hasActa = Boolean(actaLectura?.contenido && String(actaLectura.contenido).trim().length >= 25);
+    const hasContradiccion = recursos.length + replicas.length + contraReplicas.length > 0 || observaciones.length > 0;
+    const hasFinalQa =
+      Object.keys(preReviewReports || {}).length > 0 ||
+      (remediatedHallazgos.length > 0 && remediatedHallazgos.every((h: any) => Boolean(h.recomendacionSupervisor?.trim())));
+
+    const updatedStages = [
+      {
+        step: 1,
+        title: 'Planificación y Análisis',
+        description: 'Recepción de credenciales, análisis preliminar, identificación de titulares (decretos) y evaluación de riesgos/controles NOBACI.',
+        keyActions: ['Acreditación del equipo', 'Revisión marco legal jerárquico', 'Identificación de directores por período'],
+        status: entity?.nombre && (directors.length > 0 || hasDocs) ? 'Completado' : hasDocs || entity?.nombre ? 'En Proceso' : 'Pendiente',
+        evidenciaVerificada: `${entity?.siglas || 'Entidad'} • ${directors.length} director(es) registrados • ${remediatedHallazgos.filter((h: any) => h.etapaCcrd === 1).length} hallazgo(s) Etapa 1.`,
+      },
+      {
+        step: 2,
+        title: 'Ejecución',
+        description: 'Aplicación de pruebas sustantivas y de cumplimiento sobre contrataciones, ciclo de pagos, RR. HH. e inventarios.',
+        keyActions: ['Extracción literal 3.01+', 'Pruebas de cumplimiento NOBACI', 'Detección de duplicidades'],
+        status: remediatedHallazgos.length > 0 && (contractRows.length > 0 || paymentCycleRows.length > 0 || hasDocs) ? 'Completado' : remediatedHallazgos.length > 0 ? 'En Proceso' : 'Pendiente',
+        evidenciaVerificada: `${remediatedHallazgos.filter((h: any) => h.etapaCcrd === 2).length} hallazgo(s) Etapa 2 • ${contractRows.length} contrato(s) • ${paymentCycleRows.length} pago(s).`,
+      },
+      {
+        step: 3,
+        title: 'Comunicación de Hallazgos',
+        description: 'Lectura de hallazgos y concesión de plazos para recursos, réplicas y contra-réplicas bajo el debido proceso.',
+        keyActions: ['Acta de Lectura', 'Recepción de Recursos y Réplicas', 'Ponderación de Contra-Réplicas'],
+        status: hasActa && hasContradiccion ? 'Completado' : hasActa || hasContradiccion ? 'En Proceso' : 'Pendiente',
+        evidenciaVerificada: `Acta: ${hasActa ? 'Verificada' : 'Pendiente'} | Recursos: ${recursos.length} | Réplicas: ${replicas.length} | Contra-Réplicas: ${contraReplicas.length} | Hallazgos Etapa 3: ${remediatedHallazgos.filter((h: any) => h.etapaCcrd === 3).length}.`,
+      },
+      {
+        step: 4,
+        title: 'Conclusión e Informe Final',
+        description: 'Consolidación de dictamen del Supervisor/Revisor, recomendaciones correctivas CCRD (60–90 pal.) y matriz aprobada.',
+        keyActions: ['Revisión previa QA', 'Cierre de hallazgos', 'Emisión Word/Excel oficial'],
+        status: hasFinalQa && remediatedHallazgos.length > 0 ? 'Completado' : remediatedHallazgos.length > 0 ? 'En Proceso' : 'Pendiente',
+        evidenciaVerificada: `${remediatedHallazgos.filter((h: any) => Boolean(h.recomendacionSupervisor?.trim())).length}/${remediatedHallazgos.length} con recomendación CCRD • Etapa 4: ${remediatedHallazgos.filter((h: any) => h.etapaCcrd === 4).length} hallazgo(s).`,
+      },
+    ];
+
+    correccionesAplicadas.push('Sincronizadas las 4 Etapas de la Guía CCRD (Ley núm. 18-24) con la evidencia activa del expediente.');
+
+    // Auto-extract missing laws from remediated findings to add to legalLibrary
+    const existingNormKeys = new Set(
+      (legalLibrary || []).map((l: any) => String(l.numeroNorma || '').toLowerCase().replace(/[^a-z0-9]/g, ''))
+    );
+    const additionalLegalItems: any[] = [];
+    const nowIso = new Date().toISOString();
+
+    for (const h of remediatedHallazgos) {
+      for (const cite of h.leyesCitadas || []) {
+        const rawNorm = String(cite?.norma || '').trim();
+        const key = rawNorm.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!key || existingNormKeys.has(key)) continue;
+        existingNormKeys.add(key);
+        const jer = HIERARCHY_ORDER[String(cite?.jerarquia || '').toUpperCase()]
+          ? String(cite.jerarquia).toUpperCase()
+          : inferHierarchy(rawNorm).level;
+        additionalLegalItems.push({
+          id: `law-rem-${Date.now()}-${additionalLegalItems.length}`,
+          numeroNorma: rawNorm,
+          titulo: rawNorm,
+          jerarquia: jer,
+          jerarquiaOrden: HIERARCHY_ORDER[jer] || 3,
+          articulosPuntuales: cite?.articulo ? [String(cite.articulo)] : ['Por especificar'],
+          hallazgosVinculados: [h.idHallazgo],
+          url: cite?.url || '',
+          ubicacionFuente: 'Vinculada automáticamente por Corrección Integral CCRD',
+          resumenAplicacion: `Sustento normativo del acápite ${h.idHallazgo}: ${h.titulo}.`,
+          sha256: crypto.createHash('sha256').update(`${rawNorm}_${h.idHallazgo}_${nowIso}`).digest('hex'),
+          fechaRegistro: nowIso,
+        });
+      }
+    }
+
+    if (additionalLegalItems.length > 0) {
+      correccionesAplicadas.push(`Incorporadas ${additionalLegalItems.length} norma(s) faltante(s) a la Biblioteca Legal desde los criterios de hallazgos.`);
+    }
+
+    res.json({
+      success: true,
+      modelUsed,
+      resumenEjecutivoIA:
+        resumenEjecutivoIA ||
+        'Corrección integral completada: jerarquía normativa, etapas Guía CCRD, recomendaciones MAE y vinculación legal actualizadas.',
+      correccionesAplicadas,
+      brechasPendientes,
+      hallazgos: remediatedHallazgos,
+      ccrdStages: updatedStages,
+      newLegalItems: additionalLegalItems,
+      timestamp: nowIso,
+    });
+  } catch (error: any) {
+    console.error('Error in /api/forensic/remediate-integral:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Error ejecutando la corrección integral del expediente.',
+    });
   }
 });
 

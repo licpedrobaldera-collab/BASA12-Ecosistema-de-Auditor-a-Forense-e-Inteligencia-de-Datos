@@ -17,6 +17,9 @@ import {
   ListChecks,
   BarChart3,
   LayoutTemplate,
+  Copy,
+  Check,
+  PenLine,
 } from 'lucide-react';
 import {
   AuditedEntity,
@@ -171,16 +174,37 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
   onOpenLegalViewer,
   onLogAction,
 }) => {
-  const [activeTab, setActiveTab] = useState<'observados' | 'correctos' | 'matriz' | 'duplicidades'>('matriz');
+  const [activeTab, setActiveTab] = useState<'observados' | 'correctos' | 'matriz' | 'duplicidades' | 'recomendacion_ccrd'>('matriz');
   const [extracting, setExtracting] = useState(false);
   const [detectingDups, setDetectingDups] = useState(false);
   const [evaluatingRowId, setEvaluatingRowId] = useState<string | null>(null);
+  const [generatingCcrdRowId, setGeneratingCcrdRowId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Quick CGR/NOBACI Situational Evaluator State
   const [quickSituation, setQuickSituation] = useState('');
   const [quickCode, setQuickCode] = useState('3.01');
   const [evaluatingSituation, setEvaluatingSituation] = useState(false);
+
+  // CCRD Recommendation Generator State (60-90 words, 1 paragraph, MAE + "Instruir a...")
+  const [ccrdForm, setCcrdForm] = useState({
+    targetHallazgoId: '',
+    entidad: '',
+    condicion: '',
+    criterio: '',
+    causaComentario: '',
+    efecto: '',
+    conclusion: '',
+  });
+  const [ccrdDraftResult, setCcrdDraftResult] = useState('');
+  const [generatingCcrd, setGeneratingCcrd] = useState(false);
+  const [copiedCcrd, setCopiedCcrd] = useState(false);
+  const [appliedCcrdFeedback, setAppliedCcrdFeedback] = useState<string | null>(null);
+
+  const ccrdWordCount = useMemo(() => {
+    const trimmed = ccrdDraftResult.trim();
+    return trimmed ? trimmed.split(/\s+/).filter(Boolean).length : 0;
+  }, [ccrdDraftResult]);
 
   const stagesToShow = ccrdStages.length > 0 ? ccrdStages : DEFAULT_STAGES;
 
@@ -422,6 +446,159 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
       setErrorMsg(err.message || 'No se pudo evaluar la situación.');
     } finally {
       setEvaluatingSituation(false);
+    }
+  };
+
+  const handleGenerateRowCcrdRecommendation = async (row: HallazgoMatrizLiteral) => {
+    setGeneratingCcrdRowId(row.id);
+    setErrorMsg(null);
+    try {
+      const resp = await fetch('/api/forensic/generate-ccrd-recommendation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          idHallazgo: row.idHallazgo,
+          entidad: activeEntity?.nombre || 'Entidad Pública Auditada',
+          condicion: row.condicionLiteral || row.titulo,
+          criterio: row.criterioTexto || row.criterioAuditorOriginal || '',
+          causaComentario: row.causa || 'Deficiencia de supervisión operativa y falta de controles preventivos documentados.',
+          efecto: row.efecto || 'Riesgo institucional de incumplimiento normativo y vulnerabilidad en el control interno.',
+          conclusion: `${row.titulo}${row.responsableArea ? `. Área vinculada: ${row.responsableArea}` : ''}`,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) {
+        throw new Error(data.error || 'Error redactando recomendación estilo CCRD.');
+      }
+      const texto = String(data.recomendacion || '').trim();
+      if (texto) {
+        updateRow(row.id, { recomendacionSupervisor: texto });
+        onLogAction(
+          'Recomendación CCRD Generada',
+          `Hallazgo ${row.idHallazgo}: redactada recomendación CCRD (${data.wordCount || texto.split(/\s+/).length} palabras) dirigida al Titular/MAE.`
+        );
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || 'No se pudo redactar la recomendación CCRD para el hallazgo.');
+    } finally {
+      setGeneratingCcrdRowId(null);
+    }
+  };
+
+  const handleLoadHallazgoIntoCcrdForm = (hallazgoId: string) => {
+    const found = hallazgos.find((h) => h.id === hallazgoId);
+    if (!found) {
+      setCcrdForm((prev) => ({ ...prev, targetHallazgoId: '' }));
+      return;
+    }
+    setCcrdForm({
+      targetHallazgoId: found.id,
+      entidad: activeEntity?.nombre || '',
+      condicion: found.condicionLiteral || '',
+      criterio: found.criterioTexto || found.criterioAuditorOriginal || '',
+      causaComentario: found.causa || '',
+      efecto: found.efecto || '',
+      conclusion: found.titulo || '',
+    });
+    if (found.recomendacionSupervisor) {
+      setCcrdDraftResult(found.recomendacionSupervisor);
+    }
+    setAppliedCcrdFeedback(null);
+  };
+
+  const handleGenerateStandaloneCcrdRecommendation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setGeneratingCcrd(true);
+    setErrorMsg(null);
+    setAppliedCcrdFeedback(null);
+    try {
+      const resp = await fetch('/api/forensic/generate-ccrd-recommendation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          entidad: ccrdForm.entidad.trim() || activeEntity?.nombre || 'Entidad Pública Auditada',
+          condicion: ccrdForm.condicion,
+          criterio: ccrdForm.criterio,
+          causaComentario: ccrdForm.causaComentario,
+          efecto: ccrdForm.efecto,
+          conclusion: ccrdForm.conclusion,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) {
+        throw new Error(data.error || 'No se pudo redactar la recomendación estilo CCRD.');
+      }
+      const texto = String(data.recomendacion || '').trim();
+      setCcrdDraftResult(texto);
+      onLogAction(
+        'Redacción Recomendación CCRD',
+        `Generada recomendación estilo CCRD (${data.wordCount || texto.split(/\s+/).length} palabras) para ${ccrdForm.entidad.trim() || activeEntity?.nombre || 'la entidad'}.`
+      );
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Error generando recomendación estilo CCRD.');
+    } finally {
+      setGeneratingCcrd(false);
+    }
+  };
+
+  const handleCopyCcrdRecommendation = async () => {
+    if (!ccrdDraftResult.trim()) return;
+    try {
+      await navigator.clipboard.writeText(ccrdDraftResult.trim());
+      setCopiedCcrd(true);
+      setTimeout(() => setCopiedCcrd(false), 2000);
+    } catch {
+      // Fallback noop if clipboard unavailable
+    }
+  };
+
+  const handleApplyCcrdRecommendationToMatrix = () => {
+    if (!ccrdDraftResult.trim()) return;
+    if (ccrdForm.targetHallazgoId) {
+      const target = hallazgos.find((h) => h.id === ccrdForm.targetHallazgoId);
+      updateRow(ccrdForm.targetHallazgoId, {
+        recomendacionSupervisor: ccrdDraftResult.trim(),
+      });
+      setAppliedCcrdFeedback(
+        `Aplicada al acápite ${target?.idHallazgo || ''} en la Matriz 3.01+ y lista para exportar a Word/Excel.`
+      );
+      onLogAction(
+        'Aplicación Recomendación CCRD',
+        `Se actualizó el acápite ${target?.idHallazgo || ''} con la recomendación estilo CCRD (${ccrdWordCount} palabras).`
+      );
+    } else {
+      const nextCode = `3.${String(hallazgos.length + 1).padStart(2, '0')}`;
+      const newRow: HallazgoMatrizLiteral = {
+        id: `hz-ccrd-${Date.now()}`,
+        idHallazgo: nextCode,
+        titulo: (ccrdForm.conclusion || ccrdForm.condicion || 'Hallazgo con Recomendación CCRD').slice(0, 95),
+        condicionLiteral: ccrdForm.condicion.trim(),
+        criterioTexto: ccrdForm.criterio.trim(),
+        criterioAuditorOriginal: '',
+        jerarquiaCriterio: 'LEY',
+        jerarquiaOrden: 3,
+        causa: ccrdForm.causaComentario.trim(),
+        efecto: ccrdForm.efecto.trim(),
+        estado: 'Con Observación / Mejora',
+        nivelRiesgo: 'Medio (Moderado)',
+        referenciaExacta: '',
+        puntaje0a10: 6.5,
+        recomendacionSupervisor: ccrdDraftResult.trim(),
+        planAccionCorrectivo: '',
+        responsableArea: 'MAE / Unidades Competentes',
+        entregable: 'Evidencia de Cumplimiento de Recomendación CCRD',
+        leyesCitadas: [],
+        origenDocumento: 'Redactor de Recomendación CCRD',
+      };
+      setHallazgos((prev) => [...prev, newRow]);
+      setCcrdForm((prev) => ({ ...prev, targetHallazgoId: newRow.id }));
+      setAppliedCcrdFeedback(
+        `Creado acápite ${nextCode} en la Matriz 3.01+ con la recomendación estilo CCRD.`
+      );
+      onLogAction(
+        'Alta Hallazgo con Recomendación CCRD',
+        `Se registró ${nextCode} en la Matriz 3.01+ (${ccrdWordCount} palabras).`
+      );
     }
   };
 
@@ -839,6 +1016,7 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
             { id: 'correctos', label: `🟢 Componentes Correctos (${correctos.length})` },
             { id: 'observados', label: `🔴 Con Observación / Mejora (${conObservacion.length})` },
             { id: 'duplicidades', label: `🪞 Duplicidades Detectadas (${duplicidades.length})` },
+            { id: 'recomendacion_ccrd', label: '✍️ Recomendación CCRD (60–90 pal.)' },
           ].map((t) => (
             <button
               key={t.id}
@@ -866,7 +1044,165 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
       </div>
 
       {/* 5. Tab Content */}
-      {activeTab === 'duplicidades' ? (
+      {activeTab === 'recomendacion_ccrd' ? (
+        <div className="bg-slate-950/90 border border-emerald-500/30 rounded-xl p-5 space-y-4 text-xs">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+            <div>
+              <h3 className="text-sm font-bold text-emerald-300 flex items-center gap-2">
+                <PenLine className="w-4 h-4 text-emerald-400" />
+                Redactor Técnico de Recomendación de Auditoría — Estilo CCRD (60 a 90 palabras)
+              </h3>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Genera 1 solo párrafo corto (60–90 palabras), dirigido al Titular/MAE, iniciando con <strong>&quot;Instruir a...&quot;</strong>, señalando departamentos responsables, acción concreta de control y cerrando exclusivamente con la base legal del criterio suministrado.
+              </p>
+            </div>
+            <div className="min-w-[240px]">
+              <label className="text-[10px] text-slate-400 block mb-1">Precargar insumos desde Matriz 3.01+</label>
+              <select
+                value={ccrdForm.targetHallazgoId}
+                onChange={(e) => handleLoadHallazgoIntoCcrdForm(e.target.value)}
+                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-sky-200 font-medium"
+              >
+                <option value="">-- Nuevo hallazgo / Redacción libre --</option>
+                {hallazgos.map((h) => (
+                  <option key={h.id} value={h.id}>
+                    {h.idHallazgo} — {h.titulo.slice(0, 55)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <form onSubmit={handleGenerateStandaloneCcrdRecommendation} className="space-y-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label className="text-[10.5px] text-slate-300 font-semibold block mb-1">Entidad (Nombre de la institución)</label>
+                <input
+                  type="text"
+                  value={ccrdForm.entidad || activeEntity?.nombre || ''}
+                  onChange={(e) => setCcrdForm((p) => ({ ...p, entidad: e.target.value }))}
+                  placeholder="Ej: Ministerio / Ayuntamiento / Dirección General..."
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white"
+                />
+              </div>
+              <div>
+                <label className="text-[10.5px] text-slate-300 font-semibold block mb-1">Conclusión del hallazgo</label>
+                <input
+                  type="text"
+                  value={ccrdForm.conclusion}
+                  onChange={(e) => setCcrdForm((p) => ({ ...p, conclusion: e.target.value }))}
+                  placeholder="Síntesis concluyente del auditor sobre la deficiencia..."
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white"
+                />
+              </div>
+              <div>
+                <label className="text-[10.5px] text-slate-300 font-semibold block mb-1">Condición (Hecho detectado)</label>
+                <textarea
+                  rows={3}
+                  value={ccrdForm.condicion}
+                  onChange={(e) => setCcrdForm((p) => ({ ...p, condicion: e.target.value }))}
+                  placeholder="Pegar texto exacto de la condición detectada..."
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200"
+                />
+              </div>
+              <div>
+                <label className="text-[10.5px] text-sky-300 font-semibold block mb-1">Criterio (Leyes, decretos, resoluciones o NOBACI)</label>
+                <textarea
+                  rows={3}
+                  value={ccrdForm.criterio}
+                  onChange={(e) => setCcrdForm((p) => ({ ...p, criterio: e.target.value }))}
+                  placeholder="Pegar artículos, leyes, decretos o resoluciones citadas en el criterio..."
+                  className="w-full bg-slate-900 border border-sky-700/50 rounded-lg p-2.5 text-sky-200"
+                />
+              </div>
+              <div>
+                <label className="text-[10.5px] text-slate-300 font-semibold block mb-1">Causa / Comentario de la entidad</label>
+                <textarea
+                  rows={2}
+                  value={ccrdForm.causaComentario}
+                  onChange={(e) => setCcrdForm((p) => ({ ...p, causaComentario: e.target.value }))}
+                  placeholder="Pegar causa origen y/o comentario presentado por la entidad..."
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-300"
+                />
+              </div>
+              <div>
+                <label className="text-[10.5px] text-slate-300 font-semibold block mb-1">Efecto (Impacto / Riesgo)</label>
+                <textarea
+                  rows={2}
+                  value={ccrdForm.efecto}
+                  onChange={(e) => setCcrdForm((p) => ({ ...p, efecto: e.target.value }))}
+                  placeholder="Pegar efecto institucional, financiero o administrativo..."
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-300"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between flex-wrap gap-2 pt-1">
+              <div className="text-[11px] text-slate-400">
+                Regla CCRD: Máximo 1 párrafo corto (60–90 palabras) • Tono imperativo • Sin normas inventadas.
+              </div>
+              <button
+                type="submit"
+                disabled={generatingCcrd || (!ccrdForm.condicion.trim() && !ccrdForm.criterio.trim())}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 text-white rounded-lg font-bold flex items-center gap-1.5 cursor-pointer"
+              >
+                {generatingCcrd ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                {generatingCcrd ? 'Redactando (60–90 palabras)...' : 'Generar Recomendación CCRD'}
+              </button>
+            </div>
+          </form>
+
+          {ccrdDraftResult && (
+            <div className="bg-slate-900/90 border border-emerald-500/40 rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <span className="font-bold text-emerald-300 flex items-center gap-1.5">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                  Recomendación de Auditoría Generada (Editable)
+                </span>
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`px-2.5 py-0.5 rounded font-mono font-bold text-[11px] border ${
+                      ccrdWordCount >= 60 && ccrdWordCount <= 90
+                        ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                        : 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                    }`}
+                  >
+                    {ccrdWordCount} palabras {ccrdWordCount >= 60 && ccrdWordCount <= 90 ? '• Rango CCRD OK (60–90)' : '• Meta: 60–90'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleCopyCcrdRecommendation}
+                    className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                  >
+                    {copiedCcrd ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    {copiedCcrd ? 'Copiado' : 'Copiar'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleApplyCcrdRecommendationToMatrix}
+                    className="px-3 py-1 bg-sky-600 hover:bg-sky-500 text-white rounded text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+                  >
+                    <CheckSquare className="w-3.5 h-3.5" />
+                    {ccrdForm.targetHallazgoId ? 'Aplicar al Hallazgo Seleccionado' : 'Añadir a Matriz 3.01+'}
+                  </button>
+                </div>
+              </div>
+              <textarea
+                rows={4}
+                value={ccrdDraftResult}
+                onChange={(e) => setCcrdDraftResult(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg p-3 text-slate-100 text-xs leading-relaxed"
+              />
+              {appliedCcrdFeedback && (
+                <div className="text-[11px] text-emerald-300 font-semibold flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  {appliedCcrdFeedback}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      ) : activeTab === 'duplicidades' ? (
         <div className="space-y-3">
           {duplicidades.length === 0 ? (
             <div className="bg-slate-950/60 border border-dashed border-slate-800 rounded-xl p-6 text-center text-xs text-slate-400">
@@ -994,6 +1330,21 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
 
                   <button
                     type="button"
+                    onClick={() => handleGenerateRowCcrdRecommendation(h)}
+                    disabled={generatingCcrdRowId === h.id}
+                    title="Redacta 1 párrafo corto (60-90 palabras) dirigido al Titular/MAE iniciando con 'Instruir a...'"
+                    className="px-2.5 py-1 bg-emerald-600/25 hover:bg-emerald-600/45 text-emerald-200 border border-emerald-500/40 rounded text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                  >
+                    {generatingCcrdRowId === h.id ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <PenLine className="w-3 h-3" />
+                    )}
+                    Recomendación CCRD (60–90)
+                  </button>
+
+                  <button
+                    type="button"
                     onClick={() => deleteRow(h.id)}
                     className="text-slate-500 hover:text-red-400 p-1 rounded cursor-pointer"
                     title="Eliminar acápite"
@@ -1003,8 +1354,8 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
                 </div>
               </div>
 
-              {/* Hierarchy, Risk Level, Exact Reference & Responsible Area Strip */}
-              <div className="grid grid-cols-1 md:grid-cols-5 gap-2.5">
+              {/* Hierarchy, CCRD Stage, Risk Level, Exact Reference & Responsible Area Strip */}
+              <div className="grid grid-cols-1 md:grid-cols-6 gap-2.5">
                 <div>
                   <label className="text-[10.5px] text-slate-400 block mb-1">Jerarquía del Criterio</label>
                   <select
@@ -1021,6 +1372,23 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
                         {p.title}
                       </option>
                     ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10.5px] text-slate-400 block mb-1">Etapa Guía CCRD</label>
+                  <select
+                    value={h.etapaCcrd || 2}
+                    onChange={(e) =>
+                      updateRow(h.id, {
+                        etapaCcrd: Number(e.target.value) as 1 | 2 | 3 | 4,
+                      })
+                    }
+                    className="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-emerald-300 font-semibold"
+                  >
+                    <option value={1}>Etapa 1: Planificación</option>
+                    <option value={2}>Etapa 2: Ejecución</option>
+                    <option value={3}>Etapa 3: Comunicación</option>
+                    <option value={4}>Etapa 4: Conclusión</option>
                   </select>
                 </div>
                 <div>
@@ -1135,11 +1503,18 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
                   />
                 </div>
                 <div>
-                  <label className="text-[10.5px] text-emerald-300 font-semibold block mb-1">
-                    Resultado del Análisis del Supervisor / Revisor Técnico
-                  </label>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label className="text-[10.5px] text-emerald-300 font-semibold">
+                      Recomendación CCRD / Resultado del Supervisor
+                    </label>
+                    {h.recomendacionSupervisor.trim() && (
+                      <span className="text-[10px] font-mono text-emerald-400/90">
+                        {h.recomendacionSupervisor.trim().split(/\s+/).filter(Boolean).length} palabras
+                      </span>
+                    )}
+                  </div>
                   <textarea
-                    rows={2}
+                    rows={3}
                     value={h.recomendacionSupervisor}
                     onChange={(e) => updateRow(h.id, { recomendacionSupervisor: e.target.value })}
                     className="w-full bg-slate-900 border border-emerald-800/50 rounded-lg p-2 text-emerald-100"

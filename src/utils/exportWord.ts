@@ -289,11 +289,18 @@ export function downloadWordReport(data: {
       <td><strong>${escapeHtml(l.numeroNorma)}</strong><br/><span style="font-size:8.5pt;">${escapeHtml(l.titulo)}</span></td>
       <td>${escapeHtml((l.articulosPuntuales || []).join(', '))}</td>
       <td>${escapeHtml((l.hallazgosVinculados || []).join(', ') || 'General')}</td>
-      <td>${
-        l.url
-          ? `<a href="${escapeHtml(l.url)}">${escapeHtml(l.ubicacionFuente || l.url)}</a>`
-          : escapeHtml(l.ubicacionFuente || 'Expediente')
-      }</td>
+      <td>
+        ${
+          l.url
+            ? `<a href="${escapeHtml(l.url)}">${escapeHtml(l.ubicacionFuente || l.url)}</a>`
+            : escapeHtml(l.ubicacionFuente || 'Expediente')
+        }
+        ${
+          l.resumenAplicacion || l.textoExtraido
+            ? `<br/><span style="font-size:8pt; color:#475569;"><strong>Fragmento verificado:</strong> ${escapeHtml((l.resumenAplicacion || l.textoExtraido || '').slice(0, 350))}</span>`
+            : ''
+        }
+      </td>
     </tr>`
       )
       .join('')}

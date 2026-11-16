@@ -641,6 +641,70 @@ export const BuscadorDecretosOficiales: React.FC<Props> = ({
           )}
         </div>
       )}
+
+      {/* Persisted Decrees & Verifiable Sources in Case Legal Library */}
+      {(() => {
+        const savedDecrees = legalLibrary.filter((l) => l.jerarquia === 'DECRETO');
+        if (savedDecrees.length === 0) return null;
+        return (
+          <div className="pt-3 border-t border-slate-800 space-y-2">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <span className="text-xs font-bold text-emerald-300 flex items-center gap-1.5">
+                <BookOpen className="w-4 h-4" />
+                Decretos y Fuentes Oficiales Guardados en Biblioteca Legal del Caso ({savedDecrees.length})
+              </span>
+              <span className="text-[10.5px] text-slate-400">
+                Sincronizado con el expediente y exportación Word/Excel
+              </span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+              {savedDecrees.map((dec) => (
+                <div
+                  key={dec.id}
+                  className="bg-slate-950/80 border border-emerald-500/30 rounded-xl p-3 text-xs space-y-1.5"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="font-bold text-amber-300 font-mono truncate">{dec.numeroNorma}</div>
+                      <div className="text-slate-200 font-semibold truncate">{dec.titulo}</div>
+                    </div>
+                    {onOpenLegalViewer && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenLegalViewer(dec)}
+                        className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-sky-300 rounded text-[10.5px] font-semibold flex items-center gap-1 shrink-0 cursor-pointer"
+                      >
+                        <FileText className="w-3 h-3" />
+                        Visor
+                      </button>
+                    )}
+                  </div>
+                  {dec.url && (
+                    <a
+                      href={dec.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[10.5px] font-mono text-sky-400 hover:underline flex items-center gap-1 truncate"
+                    >
+                      <ExternalLink className="w-3 h-3 shrink-0" />
+                      <span className="truncate">{dec.url}</span>
+                    </a>
+                  )}
+                  {(dec.resumenAplicacion || dec.textoExtraido) && (
+                    <p className="text-[11px] text-slate-300 bg-slate-900/80 border border-slate-800 rounded p-2 line-clamp-3">
+                      “{dec.resumenAplicacion || dec.textoExtraido}”
+                    </p>
+                  )}
+                  <div className="text-[10px] font-mono text-slate-500 flex items-center justify-between gap-2">
+                    <span className="truncate">{dec.ubicacionFuente}</span>
+                    <span className="shrink-0">SHA-256: {dec.sha256.slice(0, 10)}...</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
     </section>
   );
 };

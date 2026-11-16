@@ -3,9 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
-  FolderTree,
   History,
   Sparkles,
   Sliders,
@@ -19,6 +18,12 @@ import {
   Layers,
   CheckCircle2,
   Plus,
+  Database,
+  LogIn,
+  LogOut,
+  ShieldCheck,
+  AlertTriangle,
+  Loader2,
 } from 'lucide-react';
 import { EvidenceSection, StructuredExtractionPayload } from './components/EvidenceSection';
 import { AnalysisSection } from './components/AnalysisSection';
@@ -28,12 +33,14 @@ import { HistoryModal } from './components/HistoryModal';
 import { ThresholdConfigModal, DEFAULT_THRESHOLDS } from './components/ThresholdConfigModal';
 import { RealtimeAlertBanner } from './components/RealtimeAlertBanner';
 import { RiskDashboard } from './components/RiskDashboard';
+import { InstitutionalRiskDashboardSection } from './components/InstitutionalRiskDashboardSection';
 import { ContradictoryDossierSection } from './components/ContradictoryDossierSection';
 import { ObservationEvaluatorSection } from './components/ObservationEvaluatorSection';
 import { UserProfileAndScopeModal } from './components/UserProfileAndScopeModal';
 import { TraceabilityTimelineModal } from './components/TraceabilityTimelineModal';
 import { EntitySwitcherBar } from './components/EntitySwitcherBar';
 import { CaseRegistryAndHistorySection } from './components/CaseRegistryAndHistorySection';
+import { ProjectUploadsAndHistoryHub } from './components/ProjectUploadsAndHistoryHub';
 import { CaseScreenViewerModal } from './components/CaseScreenViewerModal';
 import { PaymentCycleSection } from './components/PaymentCycleSection';
 import { AiStepCoach } from './components/AiStepCoach';
@@ -43,6 +50,30 @@ import { InteractivePreReviewRunnerSection } from './components/InteractivePreRe
 import { CcrdNobaciMatrixSection } from './components/CcrdNobaciMatrixSection';
 import { LegalLibrarySection } from './components/LegalLibrarySection';
 import { LegalDocumentViewerModal } from './components/LegalDocumentViewerModal';
+import {
+  auth,
+  googleProvider,
+  onAuthStateChanged,
+  signInWithPopup,
+  signOut,
+  User,
+} from './firebase';
+import {
+  closeProjectInFirestore,
+  deleteEntityAndProjectsFromFirestore,
+  deleteProjectCascadeFromFirestore,
+  deleteUploadFromFirestore,
+  loadUserPrivateProfile,
+  saveEntityToFirestore,
+  saveProjectToFirestore,
+  saveUploadToFirestore,
+  subscribeToEntities,
+  subscribeToProjectIterations,
+  subscribeToProjectUploads,
+  subscribeToUserProjects,
+  syncUserProfileToFirestore,
+  uploadRecordToEvidenceFile,
+} from './services/firestoreService';
 import {
   AuditedEntity,
   CaseIteration,
@@ -58,6 +89,7 @@ import {
   InteractivePreReviewReport,
   LegalReferenceItem,
   PreReviewDocType,
+  ProjectUploadRecord,
   RealtimeAlert,
   AuditorProfile,
   AuditPeriodScope,
@@ -210,6 +242,15 @@ export default function App() {
   const [paymentCycleRows, setPaymentCycleRows] = useState<PaymentCycleRow[]>([]);
   const [currentResult, setCurrentResult] = useState<ForensicAnalysisResult | null>(null);
 
+  // Firebase Auth & Cloud Firestore Session
+  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState<boolean>(true);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [firestoreError, setFirestoreError] = useState<string | null>(null);
+  const [allProjects, setAllProjects] = useState<CaseSession[]>([]);
+  const [activeProjectUploads, setActiveProjectUploads] = useState<ProjectUploadRecord[]>([]);
+  const [isSavingUpload, setIsSavingUpload] = useState(false);
+
   // Fraud Thresholds & Modals
   const [thresholds, setThresholds] = useState<ForensicThresholds>(DEFAULT_THRESHOLDS);
   const [showThresholdModal, setShowThresholdModal] = useState(false);
@@ -223,47 +264,146 @@ export default function App() {
   const [lastSavedMessage, setLastSavedMessage] = useState<string | null>(null);
 
   // Cases exclusively scoped to the activeEntity
-  const [entityCases, setEntityCases] = useState<CaseSession[]>([]);
+  const entityCases = useMemo(() => {
+    if (!activeEntity) return [];
+    return allProjects.filter((c) => c.entity?.id === activeEntity.id);
+  }, [allProjects, activeEntity]);
 
-  // Load persisted entities on startup (ZERO seed demo data)
+  // Listen to Firebase Auth State
   useEffect(() => {
-    const loadPersisted = async () => {
-      try {
-        const entRes = await fetch('/api/entities');
-        if (entRes.ok) {
-          const entData = await entRes.json();
-          if (entData.success && Array.isArray(entData.entities) && entData.entities.length > 0) {
-            setEntities(entData.entities);
-            const firstEnt: AuditedEntity = entData.entities[0];
-            setActiveEntity(firstEnt);
-            setSelectedCountry(firstEnt.paisCodigo || 'DO');
-            setNombreCaso(`Auditoria_${firstEnt.siglas}_${new Date().getFullYear()}`);
-            await fetchCasesForEntity(firstEnt.id);
-          }
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      setFirebaseUser(user);
+      setAuthLoading(false);
+      setAuthError(null);
+      if (user) {
+        try {
+          const savedPriv = await loadUserPrivateProfile(user.uid);
+          const mergedProfile: AuditorProfile = {
+            nombre: savedPriv?.nombre || auditor.nombre || user.displayName || '',
+            cedulaId: savedPriv?.cedulaId || auditor.cedulaId || '',
+            cargo: savedPriv?.cargo || auditor.cargo || 'Auditor Forense',
+            entidad: savedPriv?.entidad || auditor.entidad || '',
+            pais: savedPriv?.pais || auditor.pais || 'República Dominicana',
+            colegiatura: savedPriv?.colegiatura || auditor.colegiatura || '',
+          };
+          setAuditor(mergedProfile);
+          await syncUserProfileToFirestore(user, mergedProfile);
+        } catch (err: any) {
+          console.warn('Sync profile:', err?.message || err);
         }
-      } catch (err) {
-        console.warn('Error cargando entidades persistidas:', err);
+      } else {
+        setEntities([]);
+        setActiveEntity(null);
+        setAllProjects([]);
+        setActiveProjectUploads([]);
+        setIterations([]);
       }
-    };
-    loadPersisted();
+    });
+    return () => unsub();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const fetchCasesForEntity = async (entityId: string) => {
-    try {
-      const resp = await fetch(
-        `/api/cases?entityId=${encodeURIComponent(entityId)}&sessionOwnerId=${encodeURIComponent(sessionOwnerId)}`
-      );
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data.success && Array.isArray(data.cases)) {
-          setEntityCases(data.cases);
-          return data.cases as CaseSession[];
+  // Subscribe to Firestore Entities & Projects once authenticated
+  useEffect(() => {
+    if (!firebaseUser) return;
+    setFirestoreError(null);
+
+    const unsubEntities = subscribeToEntities(
+      firebaseUser.uid,
+      (loadedEntities) => {
+        setEntities(loadedEntities);
+        setActiveEntity((prev) => {
+          if (prev && loadedEntities.some((e) => e.id === prev.id)) {
+            return loadedEntities.find((e) => e.id === prev.id) || prev;
+          }
+          if (!prev && loadedEntities.length > 0) {
+            return loadedEntities[0];
+          }
+          return prev;
+        });
+      },
+      (err) => setFirestoreError(`Error leyendo entidades en Firestore: ${err.message}`)
+    );
+
+    const unsubProjects = subscribeToUserProjects(
+      firebaseUser.uid,
+      (loadedProjects) => {
+        setAllProjects(loadedProjects);
+      },
+      (err) => setFirestoreError(`Error leyendo proyectos en Firestore: ${err.message}`)
+    );
+
+    return () => {
+      unsubEntities();
+      unsubProjects();
+    };
+  }, [firebaseUser]);
+
+  useEffect(() => {
+    if (!activeEntity) return;
+    setSelectedCountry((cur) => cur || activeEntity.paisCodigo || 'DO');
+    setNombreCaso((cur) => cur || `Auditoria_${activeEntity.siglas}_${new Date().getFullYear()}`);
+  }, [activeEntity]);
+
+  // Subscribe to Real Uploads & Version Iterations for the active project
+  useEffect(() => {
+    if (!firebaseUser || !activeCaseId) {
+      setActiveProjectUploads([]);
+      setIterations([]);
+      return;
+    }
+
+    const unsubUploads = subscribeToProjectUploads(
+      activeCaseId,
+      firebaseUser.uid,
+      (uploads) => {
+        setActiveProjectUploads(uploads);
+        if (uploads.length > 0) {
+          setEvidenceFile((cur) => {
+            if (!cur) return cur;
+            const match = uploads.find((u) => u.sha256 === cur.sha256);
+            if (match && match.extractedText.length > (cur.extractedText?.length || 0)) {
+              return uploadRecordToEvidenceFile(match);
+            }
+            return cur;
+          });
         }
-      }
-    } catch {}
-    setEntityCases([]);
-    return [];
+      },
+      () => setActiveProjectUploads([])
+    );
+
+    const unsubIters = subscribeToProjectIterations(
+      activeCaseId,
+      firebaseUser.uid,
+      (iters) => setIterations(iters),
+      () => setIterations([])
+    );
+
+    return () => {
+      unsubUploads();
+      unsubIters();
+    };
+  }, [firebaseUser, activeCaseId]);
+
+  const handleGoogleSignIn = async () => {
+    setAuthError(null);
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (err: any) {
+      setAuthError(
+        err?.code === 'auth/popup-closed-by-user'
+          ? 'Inicio de sesión cancelado. Pulsa el botón para autorizar tu cuenta.'
+          : err?.message || 'No se pudo iniciar sesión con Google.'
+      );
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+    } catch (err: any) {
+      setAuthError(err?.message || 'Error cerrando sesión.');
+    }
   };
 
   // Persist auditor profile locally
@@ -381,15 +521,15 @@ export default function App() {
     if (matchingCountry) {
       setSelectedCountry(matchingCountry.codigo);
     }
-    const loadedCases = await fetchCasesForEntity(entity.id);
+    const loadedCases = allProjects.filter((c) => c.entity?.id === entity.id);
     if (loadedCases.length > 0) {
       handleSelectCaseFromHistory(loadedCases[0]);
       setLastSavedMessage(
-        `Entidad cambiada a ${entity.siglas}. Mostrando sus ${loadedCases.length} caso(s) exclusivos.`
+        `Entidad cambiada a ${entity.siglas}. Mostrando sus ${loadedCases.length} proyecto(s) en Firestore.`
       );
     } else {
       resetWorkspaceForEntity(entity, 0);
-      setLastSavedMessage(`Entidad activa: ${entity.siglas} (${entity.nombre}). Lista para cargar datos reales.`);
+      setLastSavedMessage(`Entidad activa: ${entity.siglas} (${entity.nombre}). Lista para cargas reales.`);
     }
     logTraceabilityAction(
       'Selección de Entidad Exclusiva',
@@ -399,14 +539,10 @@ export default function App() {
   };
 
   const handleSaveEntity = async (savedEnt: AuditedEntity, isNew: boolean) => {
+    if (!firebaseUser) return;
+    setFirestoreError(null);
     try {
-      const resp = await fetch('/api/entities', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(savedEnt),
-      });
-      const data = await resp.json();
-      const persisted = data.success && data.entity ? (data.entity as AuditedEntity) : savedEnt;
+      const persisted = await saveEntityToFirestore(savedEnt, firebaseUser.uid);
 
       setEntities((prev) => {
         const exists = prev.some((e) => e.id === persisted.id);
@@ -417,34 +553,39 @@ export default function App() {
       if (matchingCountry) setSelectedCountry(matchingCountry.codigo);
 
       if (isNew) {
-        setEntityCases([]);
         resetWorkspaceForEntity(persisted, 0);
-        setLastSavedMessage(`Entidad real ${persisted.siglas} registrada. Avanza al Paso 2 para cargar documentos o enlaces.`);
+        setLastSavedMessage(
+          `Primera entidad real ${persisted.siglas} guardada en Firestore. Avanza al Paso 2 para realizar cargas reales.`
+        );
       } else {
-        setLastSavedMessage(`Datos de la entidad ${persisted.siglas} actualizados.`);
+        setLastSavedMessage(`Datos de la entidad ${persisted.siglas} actualizados en Firestore.`);
       }
 
       logTraceabilityAction(
-        isNew ? 'Registro de Entidad Real' : 'Edición de Entidad',
+        isNew ? 'Registro de Entidad Real (Firestore)' : 'Edición de Entidad (Firestore)',
         `${persisted.nombre} (${persisted.siglas}, RNC/NIF: ${persisted.rncNif})`,
         'ENTRADA'
       );
-    } catch (err) {
-      console.error('Error guardando entidad:', err);
+    } catch (err: any) {
+      console.error('Error guardando entidad en Firestore:', err);
+      setFirestoreError(err?.message || 'Error guardando entidad en Firestore.');
     }
   };
 
   const handleDeleteEntity = async (entityId: string) => {
+    if (!firebaseUser) return;
+    setFirestoreError(null);
     try {
-      await fetch(`/api/entities/${encodeURIComponent(entityId)}`, { method: 'DELETE' });
-    } catch {}
+      await deleteEntityAndProjectsFromFirestore(entityId, firebaseUser.uid);
+    } catch (err: any) {
+      setFirestoreError(err?.message || 'No se pudo eliminar la entidad en Firestore.');
+    }
     const remaining = entities.filter((e) => e.id !== entityId);
     setEntities(remaining);
     if (remaining.length > 0) {
       await handleSwitchEntity(remaining[0]);
     } else {
       setActiveEntity(null);
-      setEntityCases([]);
       setEvidenceFile(null);
       setContractRows([]);
       setPaymentCycleRows([]);
@@ -461,7 +602,7 @@ export default function App() {
       setCurrentResult(null);
       setNombreCaso('');
       setRequerimiento('');
-      setLastSavedMessage('Entidad eliminada. Registra una nueva entidad real para iniciar.');
+      setLastSavedMessage('Entidad eliminada de Firestore. Registra una nueva entidad real para iniciar.');
     }
   };
 
@@ -502,35 +643,21 @@ export default function App() {
   const handleNewCase = () => {
     if (!activeEntity) return;
     resetWorkspaceForEntity(activeEntity, entityCases.length);
-    setLastSavedMessage(`Nuevo caso limpio iniciado para ${activeEntity.siglas}.`);
+    setLastSavedMessage(`Nuevo proyecto limpio iniciado para ${activeEntity.siglas}.`);
     logTraceabilityAction(
-      'Nuevo Caso Exclusivo',
+      'Nuevo Proyecto Exclusivo',
       `Apertura de expediente limpio para ${activeEntity.nombre}`,
       'ENTRADA'
     );
   };
 
   const persistCaseToServer = async (casePayload: CaseSession) => {
-    const res = await fetch('/api/cases', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(casePayload),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (data.success && data.caseRecord) {
-        const rec = data.caseRecord as CaseSession;
-        if (Array.isArray(rec.iterations)) {
-          setIterations(rec.iterations);
-        }
-        setEntityCases((prev) => {
-          const exists = prev.some((c) => c.id === rec.id);
-          return exists ? prev.map((c) => (c.id === rec.id ? rec : c)) : [rec, ...prev];
-        });
-        return rec;
-      }
+    if (!firebaseUser) return casePayload;
+    const saved = await saveProjectToFirestore(casePayload, firebaseUser.uid);
+    if (Array.isArray(saved.iterations)) {
+      setIterations(saved.iterations);
     }
-    return casePayload;
+    return saved;
   };
 
   const buildActiveCaseSnapshot = async (): Promise<CaseSession> => {
@@ -544,7 +671,7 @@ export default function App() {
       id: activeCaseId,
       codigoCaso: activeCaseCode,
       nombreCaso: effectiveName,
-      sessionOwnerId,
+      sessionOwnerId: firebaseUser?.uid || sessionOwnerId,
       estado: currentResult ? 'DICTAMEN_EMITIDO' : 'EN_PROCESO',
       timestamp: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -579,34 +706,63 @@ export default function App() {
   };
 
   const handleRegisterCurrentCase = async () => {
+    if (!firebaseUser) {
+      setLastSavedMessage('Inicia sesión con Google para guardar en Firestore.');
+      return;
+    }
     if (!activeEntity) {
       setLastSavedMessage('Primero registra una entidad auditada en el Paso 1.');
       return;
     }
     setIsSavingCase(true);
+    setFirestoreError(null);
     try {
       const payload = await buildActiveCaseSnapshot();
       const saved = await persistCaseToServer(payload);
-      setLastSavedMessage(`Caso ${saved.codigoCaso} guardado exclusivamente bajo ${activeEntity.siglas}.`);
+      setLastSavedMessage(`Proyecto ${saved.codigoCaso} guardado en Firestore bajo ${activeEntity.siglas}.`);
       logTraceabilityAction(
-        'Guardado de Caso',
-        `Expediente ${saved.codigoCaso} guardado para ${activeEntity.siglas}`,
+        'Guardado de Proyecto (Firestore)',
+        `Proyecto ${saved.codigoCaso} persistido para ${activeEntity.siglas}`,
         'SALIDA'
       );
-    } catch (err) {
-      console.error('Error registrando caso:', err);
-      setLastSavedMessage('No se pudo conectar con el servidor para guardar el caso.');
+    } catch (err: any) {
+      console.error('Error registrando proyecto en Firestore:', err);
+      setFirestoreError(err?.message || 'No se pudo guardar el proyecto en Firestore.');
+      setLastSavedMessage('Error al guardar el proyecto en Firestore.');
     } finally {
       setIsSavingCase(false);
     }
   };
 
-  const handleDeleteCase = async (id: string) => {
+  const handleCloseProject = async (projectId: string) => {
+    if (!firebaseUser) return;
     try {
-      await fetch(`/api/cases/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    } catch {}
-    setEntityCases((prev) => prev.filter((c) => c.id !== id));
-    logTraceabilityAction('Eliminación de Caso', `Se eliminó el registro ${id}.`, 'SALIDA');
+      await closeProjectInFirestore(projectId, firebaseUser.uid);
+      setLastSavedMessage(`Proyecto sellado y cerrado definitivamente (${projectId}).`);
+      logTraceabilityAction('Cierre Definitivo de Proyecto', `Proyecto ${projectId} sellado en estado CERRADO.`, 'SALIDA');
+    } catch (err: any) {
+      setFirestoreError(err?.message || 'Error cerrando el proyecto.');
+    }
+  };
+
+  const handleDeleteCase = async (id: string) => {
+    if (!firebaseUser) return;
+    try {
+      await deleteProjectCascadeFromFirestore(id, firebaseUser.uid);
+      logTraceabilityAction('Eliminación de Proyecto', `Se eliminó el proyecto ${id} y sus cargas de Firestore.`, 'SALIDA');
+    } catch (err: any) {
+      setFirestoreError(err?.message || 'Error eliminando proyecto.');
+    }
+  };
+
+  const handleDeleteUpload = async (uploadId: string) => {
+    if (!activeCaseId) return;
+    try {
+      await deleteUploadFromFirestore(activeCaseId, uploadId);
+      setLastSavedMessage('Carga documental eliminada del historial del proyecto.');
+    } catch (err: any) {
+      setFirestoreError(err?.message || 'No se pudo eliminar la carga documental.');
+    }
   };
 
   const handleStructuredExtracted = async (payload: StructuredExtractionPayload) => {
@@ -820,6 +976,66 @@ export default function App() {
     setViewingCaseOnScreen(snap);
   };
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6">
+        <div className="flex flex-col items-center gap-3 text-center">
+          <Loader2 className="w-8 h-8 text-sky-400 animate-spin" />
+          <p className="text-sm text-slate-300 font-medium">Conectando con la base de datos Firestore en la nube...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!firebaseUser) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6 font-sans">
+        <div className="max-w-lg w-full bg-slate-900 border border-sky-500/30 rounded-2xl p-8 shadow-2xl space-y-6 text-center">
+          <div className="w-16 h-16 rounded-2xl bg-sky-500/15 border border-sky-500/30 flex items-center justify-center mx-auto text-sky-400">
+            <Database className="w-8 h-8" />
+          </div>
+
+          <div className="space-y-2">
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-semibold">
+              <ShieldCheck className="w-3.5 h-3.5" />
+              Base de Datos Original Desde Cero • Firestore + Auth
+            </div>
+            <h1 className="text-2xl font-extrabold text-white tracking-tight">
+              Ecosistema de Auditoría Forense CCRD &amp; Big-4
+            </h1>
+            <p className="text-xs sm:text-sm text-slate-400 leading-relaxed">
+              Inicia sesión con tu cuenta oficial de Google para habilitar tu espacio privado de{' '}
+              <strong className="text-slate-200">Entidades Reales</strong>,{' '}
+              <strong className="text-slate-200">Cargas Documentales SHA-256</strong>,{' '}
+              <strong className="text-slate-200">Historial de Proyectos</strong> y análisis completo con{' '}
+              <strong className="text-sky-300">IA Gemini 4</strong>.
+            </p>
+          </div>
+
+          {authError && (
+            <div className="bg-red-950/50 border border-red-700/60 rounded-xl p-3 text-xs text-red-200 flex items-center gap-2 text-left">
+              <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+              <span>{authError}</span>
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={handleGoogleSignIn}
+            className="w-full py-3 px-5 bg-gradient-to-r from-sky-600 to-indigo-600 hover:from-sky-500 hover:to-indigo-500 text-white rounded-xl font-bold text-sm flex items-center justify-center gap-2.5 shadow-lg shadow-sky-950/50 cursor-pointer transition-all"
+          >
+            <LogIn className="w-4 h-4" />
+            Iniciar Sesión con Google y Abrir Base de Datos
+          </button>
+
+          <p className="text-[11px] text-slate-500">
+            Cero datos demo precargados • Aislamiento estricto por usuario autenticado • Ley núm. 18-24 &amp; NOBACI
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-sky-500 selection:text-white">
       {/* Top Status Strip */}
@@ -827,6 +1043,10 @@ export default function App() {
         <div className="flex items-center gap-2 flex-wrap">
           <span className="bg-sky-500 text-slate-950 font-bold px-2 py-0.5 rounded text-[10px] uppercase tracking-wider">
             {activeCaseCode} {iterations.length > 0 ? `• v${iterations[0].version}` : ''}
+          </span>
+          <span className="px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-mono text-[10.5px] flex items-center gap-1">
+            <Database className="w-3 h-3" />
+            Firestore: {firebaseUser.email}
           </span>
           <span className="font-medium text-slate-200">
             Entidad: <strong>{activeEntity ? `${activeEntity.siglas} (${activeEntity.nombre})` : 'Sin registrar'}</strong> |{' '}
@@ -870,8 +1090,33 @@ export default function App() {
             <Clock className="w-3.5 h-3.5" />
             Trazabilidad ({traceabilityLogs.length})
           </button>
+
+          <button
+            onClick={handleSignOut}
+            className="text-xs text-slate-400 hover:text-red-300 flex items-center gap-1 font-medium cursor-pointer"
+            title="Cerrar sesión de Firebase"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            Salir
+          </button>
         </div>
       </div>
+
+      {firestoreError && (
+        <div className="bg-red-950/80 border-b border-red-800 px-4 py-2 text-xs text-red-200 flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+            {firestoreError}
+          </span>
+          <button
+            type="button"
+            onClick={() => setFirestoreError(null)}
+            className="text-red-300 hover:text-white underline cursor-pointer"
+          >
+            Ocultar
+          </button>
+        </div>
+      )}
 
       {/* Main Layout */}
       <div className="flex-1 flex flex-col lg:flex-row">
@@ -1272,15 +1517,27 @@ export default function App() {
                 </div>
               )}
 
-              <CaseRegistryAndHistorySection
-                cases={entityCases}
+              <ProjectUploadsAndHistoryHub
+                entities={entities}
                 activeEntity={activeEntity}
+                allProjects={allProjects}
                 activeCaseId={activeCaseId}
+                activeProjectUploads={activeProjectUploads}
+                activeProjectIterations={iterations}
+                isSavingCase={isSavingCase}
+                isSavingUpload={isSavingUpload}
                 onRegisterCase={handleRegisterCurrentCase}
                 onSelectCaseToLoad={handleSelectCaseFromHistory}
                 onViewCaseOnScreen={(c) => setViewingCaseOnScreen(c)}
+                onCloseProject={handleCloseProject}
                 onDeleteCase={handleDeleteCase}
-                isSaving={isSavingCase}
+                onRestoreUploadToWorkspace={(ev) => {
+                  setEvidenceFile(ev);
+                  setActiveStep(2);
+                  setLastSavedMessage(`Evidencia "${ev.name}" restaurada desde Firestore al Paso 2.`);
+                }}
+                onDeleteUpload={handleDeleteUpload}
+                onGoToUploadStep={() => setActiveStep(2)}
               />
             </div>
           )}
@@ -1303,12 +1560,31 @@ export default function App() {
               entityName={activeEntity?.nombre || ''}
               entityUrlPortal={activeEntity?.urlPortal || ''}
               paisNormativa={currentCountryConfig.nombre}
-              onFileParsed={(parsedFile, detectedCount, paymentsCount) => {
+              onFileParsed={async (parsedFile, detectedCount, paymentsCount) => {
                 logTraceabilityAction(
                   'Ingesta de Evidencia Real',
                   `Fuente ${parsedFile.name} [${parsedFile.parsedFormat || 'DIGITAL'}] (${detectedCount} contratos, ${paymentsCount} pagos, SHA-256: ${parsedFile.sha256.substring(0, 10)}...)`,
                   'ENTRADA'
                 );
+                if (firebaseUser && activeEntity) {
+                  setIsSavingUpload(true);
+                  try {
+                    const snap = await buildActiveCaseSnapshot();
+                    snap.evidenceFile = parsedFile;
+                    await saveUploadToFirestore({
+                      caseSnapshot: snap,
+                      evidenceFile: parsedFile,
+                      ownerUid: firebaseUser.uid,
+                    });
+                    setLastSavedMessage(
+                      `Carga real "${parsedFile.name}" guardada en Firestore (${activeCaseCode}).`
+                    );
+                  } catch (err: any) {
+                    console.warn('Error guardando carga en Firestore:', err?.message || err);
+                  } finally {
+                    setIsSavingUpload(false);
+                  }
+                }
               }}
               onStructuredExtracted={handleStructuredExtracted}
               onLogAction={(accion, detalle) => logTraceabilityAction(accion, detalle, 'ENTRADA')}
@@ -1469,6 +1745,35 @@ export default function App() {
                 simboloMoneda={activeCurrencySymbol}
               />
 
+              <InstitutionalRiskDashboardSection
+                activeEntity={activeEntity}
+                paisNormativa={currentCountryConfig.nombre}
+                periodo={periodo}
+                hallazgos={matrizHallazgosLiteral}
+                setHallazgos={setMatrizHallazgosLiteral}
+                observaciones={observaciones}
+                ccrdStages={ccrdStages}
+                setCcrdStages={setCcrdStages}
+                duplicidades={duplicidades}
+                directors={directors}
+                legalLibrary={legalLibrary}
+                setLegalLibrary={setLegalLibrary}
+                contractRows={contractRows}
+                paymentCycleRows={paymentCycleRows}
+                thresholds={thresholds}
+                actaLectura={actaLectura}
+                informePreliminar={informePreliminar}
+                recursos={recursos}
+                replicas={replicas}
+                contraReplicas={contraReplicas}
+                preReviewReports={preReviewReports}
+                onNavigateStep={(step) => {
+                  setActiveStep(step);
+                  setShowAllSteps(false);
+                }}
+                onLogAction={(accion, detalle) => logTraceabilityAction(accion, detalle, 'EVALUACION')}
+              />
+
               <AnalysisSection
                 nombreCaso={nombreCaso || `Caso_${activeEntity?.siglas || 'Forense'}`}
                 entidadNombre={activeEntity ? `${activeEntity.nombre} (${activeEntity.siglas})` : 'Entidad Auditada'}
@@ -1601,13 +1906,20 @@ export default function App() {
         setSelectedCountry={setSelectedCountry}
         selectedLanguage={selectedLanguage}
         setSelectedLanguage={setSelectedLanguage}
-        onSave={() =>
+        onSave={async () => {
+          if (firebaseUser) {
+            try {
+              await syncUserProfileToFirestore(firebaseUser, auditor);
+            } catch (err) {
+              console.warn('Error sincronizando perfil:', err);
+            }
+          }
           logTraceabilityAction(
             'Actualización de Perfil y Alcance',
             `Auditor: ${auditor.nombre || 'N/D'}, Jurisdicción: ${selectedCountry}, Período: ${periodo.fechaDesde} a ${periodo.fechaHasta}`,
             'ENTRADA'
-          )
-        }
+          );
+        }}
       />
 
       {/* Traceability Timeline Modal */}
@@ -1627,11 +1939,13 @@ export default function App() {
         contractRows={contractRows}
       />
 
-      {/* Entity-Scoped History Modal */}
+      {/* Entity-Scoped & Global History Modal */}
       <HistoryModal
         isOpen={showHistory}
         onClose={() => setShowHistory(false)}
         cases={entityCases}
+        allCases={allProjects}
+        activeEntity={activeEntity}
         onSelectCase={handleSelectCaseFromHistory}
         onViewCaseOnScreen={(c) => setViewingCaseOnScreen(c)}
       />
