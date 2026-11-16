@@ -1,13 +1,16 @@
-{
-  "import streamlit as st",
-  "version": "0.0.0",
-  "type": "module",
-  "scripts": {
-    "dev": "tsx server.ts",
-    "build": "vite build",
-    "start": "NODE_ENV=production tsx server.ts",
-    "preview": "vite preview",
-    "clean": "rm -rf dist server.js",
+import streamlit as st
+import pandas as pd
+import numpy as np
+import json
+import os
+from sqlalchemy import create_engine
+from google import genai
+import firebase_admin
+from firebase_admin import credentials, firestore
+import docx
+from pypdf import PdfReader
+import plotly.express as px
+
     "lint": "tsc --noEmit"
   },
   "dependencies": {
