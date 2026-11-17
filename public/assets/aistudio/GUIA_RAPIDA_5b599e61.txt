@@ -1,0 +1,1 @@
+1. Descomprima el ZIP.\n2. Ejecute INSTALAR_Y_EJECUTAR_WINDOWS.bat.\n3. Cargue el informe.\n4. Pulse Analizar documentos.\n5. Descargue Excel/CSV/Word.\n

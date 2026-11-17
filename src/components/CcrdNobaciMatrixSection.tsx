@@ -20,6 +20,9 @@ import {
   Copy,
   Check,
   PenLine,
+  Download,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import {
   AuditedEntity,
@@ -179,6 +182,8 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
   const [detectingDups, setDetectingDups] = useState(false);
   const [evaluatingRowId, setEvaluatingRowId] = useState<string | null>(null);
   const [generatingCcrdRowId, setGeneratingCcrdRowId] = useState<string | null>(null);
+  const [downloadingZip, setDownloadingZip] = useState(false);
+  const [expandedTranscriptions, setExpandedTranscriptions] = useState<Record<string, boolean>>({});
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Quick CGR/NOBACI Situational Evaluator State
@@ -728,6 +733,98 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
     });
   };
 
+  const handleDownloadBasaV2Zip = async () => {
+    setDownloadingZip(true);
+    setErrorMsg(null);
+    try {
+      const resp = await fetch('/api/forensic/download-basa-v2-zip');
+      if (!resp.ok) {
+        throw new Error('No se pudo generar el archivo ZIP V2 Full.');
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'BASA_HALLAZGOS_INTELLIGENCE_PRO_V2_FULL.zip';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      onLogAction(
+        'Descarga BASA V2 Full ZIP',
+        'Descargado paquete standalone BASA_HALLAZGOS_INTELLIGENCE_PRO_V2_FULL.zip (4 Fases + Modo Ollama Local + 22 Columnas).'
+      );
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Error descargando el paquete ZIP V2 Full.');
+    } finally {
+      setDownloadingZip(false);
+    }
+  };
+
+  const handleExportCsv22 = () => {
+    const headers = [
+      'Código',
+      'Hallazgo actual',
+      'Transcripción íntegra',
+      'Condición',
+      'Criterio',
+      'Comparación',
+      'Causa',
+      'Efecto',
+      'Riesgo',
+      'Evidencia',
+      'Cuantificación',
+      'Responsabilidad',
+      'Recomendación actual',
+      'Deficiencias',
+      'Duplicidad',
+      'Hallazgo relacionado',
+      'Justificación de conservar/eliminar/consolidar',
+      'Puntaje 0–10',
+      'Nivel',
+      'Qué falta para 10/10',
+      'Versión mejorada 10/10',
+      'Referencias normativas',
+      'Ubicación',
+    ];
+    const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const rows = hallazgos.map((h) => [
+      h.idHallazgo,
+      h.titulo,
+      h.transcripcionIntegra || h.condicionLiteral,
+      h.condicionLiteral,
+      h.criterioTexto,
+      h.comparacion || '',
+      h.causa,
+      h.efecto,
+      h.riesgoDetalle || h.nivelRiesgo || '',
+      h.evidenciaSoporte || '',
+      h.cuantificacion || '',
+      h.responsabilidadDetalle || h.responsableArea,
+      h.recomendacionSupervisor,
+      h.deficienciasRedaccion || '',
+      typeof h.duplicidadMax === 'number' ? `${Math.round(h.duplicidadMax * 100)}%` : h.esDuplicado ? 'Alta' : '0%',
+      h.hallazgoRelacionado || '',
+      h.justificacionDecision || h.estadoRecomendado || h.estado,
+      Number(h.puntaje0a10 || 0).toFixed(1),
+      h.nivelSolidezV2 || '',
+      h.queFaltaPara10 || h.planAccionCorrectivo,
+      h.versionMejorada10 || '',
+      (h.leyesCitadas || []).map((l) => `${l.norma}${l.articulo ? ` (${l.articulo})` : ''}`).join(' | '),
+      h.ubicacionExacta || h.referenciaExacta || h.seccionPadre || '',
+    ]);
+    const csvContent = '\uFEFF' + [headers.map(esc).join(','), ...rows.map((r) => r.map(esc).join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `BASA_V2_Matriz_22_Columnas_${(nombreCaso || 'Caso').replace(/[^a-zA-Z0-9_-]/g, '_')}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   const displayedRows =
     activeTab === 'correctos' ? correctos : activeTab === 'observados' ? conObservacion : hallazgos;
 
@@ -802,6 +899,26 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
           >
             <FileSpreadsheet className="w-3.5 h-3.5" />
             Excel 3.01+ (.xlsx)
+          </button>
+
+          <button
+            type="button"
+            onClick={handleExportCsv22}
+            className="px-3 py-2 bg-teal-600/20 hover:bg-teal-600/30 text-teal-200 border border-teal-500/40 rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+          >
+            <Download className="w-3.5 h-3.5" />
+            CSV 22 Cols (.csv)
+          </button>
+
+          <button
+            type="button"
+            onClick={handleDownloadBasaV2Zip}
+            disabled={downloadingZip}
+            title="Descarga el paquete Python/Streamlit V2 Full (Fases 1–4 + Modo IA Local Ollama + Motor Documental + Matriz 22 columnas)"
+            className="px-3 py-2 bg-violet-600 hover:bg-violet-500 disabled:bg-slate-800 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-lg"
+          >
+            {downloadingZip ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+            BASA V2 Full (.zip)
           </button>
 
           <button
@@ -1531,6 +1648,111 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
                     className="w-full bg-slate-900 border border-amber-800/40 rounded-lg p-2 text-amber-100"
                   />
                 </div>
+              </div>
+
+              {/* Evaluación V2 Full (13 Dimensiones + Sección Padre + Transcripción Íntegra + Mejora 10/10) */}
+              <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-3 space-y-2.5 text-[11px]">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {h.seccionPadre && (
+                      <span className="px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 font-semibold">
+                        Sección: {h.seccionPadre}
+                      </span>
+                    )}
+                    {h.ubicacionExacta && (
+                      <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">
+                        📍 {h.ubicacionExacta}
+                      </span>
+                    )}
+                    {h.nivelSolidezV2 && (
+                      <span className="px-2 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30 font-bold">
+                        Nivel: {h.nivelSolidezV2}
+                      </span>
+                    )}
+                    {h.estadoRecomendado && (
+                      <span
+                        className={`px-2 py-0.5 rounded font-bold border ${
+                          h.estadoRecomendado === 'CONSERVAR'
+                            ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                            : h.estadoRecomendado.startsWith('ELIMINAR')
+                            ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                            : 'bg-sky-500/15 text-sky-200 border-sky-500/30'
+                        }`}
+                      >
+                        Decisión: {h.estadoRecomendado}
+                      </span>
+                    )}
+                    {typeof h.duplicidadMax === 'number' && h.duplicidadMax > 0 && (
+                      <span className="px-2 py-0.5 rounded bg-slate-800 text-amber-300 font-mono">
+                        Similitud máx.: {Math.round(h.duplicidadMax * 100)}%
+                        {h.hallazgoRelacionado ? ` (${h.hallazgoRelacionado})` : ''}
+                      </span>
+                    )}
+                  </div>
+
+                  {h.transcripcionIntegra && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExpandedTranscriptions((prev) => ({ ...prev, [h.id]: !prev[h.id] }))
+                      }
+                      className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 font-semibold flex items-center gap-1 cursor-pointer"
+                    >
+                      {expandedTranscriptions[h.id] ? (
+                        <ChevronUp className="w-3.5 h-3.5" />
+                      ) : (
+                        <ChevronDown className="w-3.5 h-3.5" />
+                      )}
+                      {expandedTranscriptions[h.id]
+                        ? 'Ocultar Transcripción Íntegra'
+                        : `Ver Transcripción Íntegra (${h.transcripcionIntegra.length} chars)`}
+                    </button>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-slate-300">
+                  <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-2">
+                    <strong className="text-sky-300 block mb-0.5">Comparación (Condición vs Criterio)</strong>
+                    <span>{h.comparacion || 'Pendiente de contrastación normativa.'}</span>
+                  </div>
+                  <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-2">
+                    <strong className="text-sky-300 block mb-0.5">Evidencia y Cuantificación</strong>
+                    <span>
+                      {h.evidenciaSoporte || 'Ver documento.'}{' '}
+                      {h.cuantificacion ? `| Cuantif.: ${h.cuantificacion}` : ''}
+                    </span>
+                  </div>
+                  <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-2">
+                    <strong className="text-amber-300 block mb-0.5">Qué falta para 10/10 y Deficiencias</strong>
+                    <span>{h.queFaltaPara10 || h.deficienciasRedaccion || 'Validar evidencias de cierre.'}</span>
+                  </div>
+                </div>
+
+                {h.versionMejorada10 && (
+                  <div className="bg-emerald-950/20 border border-emerald-800/40 rounded-lg p-2.5">
+                    <strong className="text-emerald-300 block mb-1">Versión Propuesta 10/10 (Editable):</strong>
+                    <textarea
+                      rows={2}
+                      value={h.versionMejorada10}
+                      onChange={(e) => updateRow(h.id, { versionMejorada10: e.target.value })}
+                      className="w-full bg-slate-950 border border-emerald-900/50 rounded p-2 text-emerald-100 text-[11px]"
+                    />
+                  </div>
+                )}
+
+                {expandedTranscriptions[h.id] && h.transcripcionIntegra && (
+                  <div className="bg-slate-950 border border-sky-800/40 rounded-lg p-2.5 space-y-1">
+                    <div className="text-[10.5px] font-bold text-sky-300">
+                      Transcripción Íntegra Completa (Fase 3 — Base de Evaluación Real):
+                    </div>
+                    <textarea
+                      rows={8}
+                      value={h.transcripcionIntegra}
+                      onChange={(e) => updateRow(h.id, { transcripcionIntegra: e.target.value })}
+                      className="w-full bg-slate-900 border border-slate-800 rounded p-2 font-mono text-[10.5px] text-slate-200 leading-relaxed"
+                    />
+                  </div>
+                )}
               </div>
 
               {/* Artículos y Normas Puntuales que Aplican como Criterio (Lo que debe ser) */}

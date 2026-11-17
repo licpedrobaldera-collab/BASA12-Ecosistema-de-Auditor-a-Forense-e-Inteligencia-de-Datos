@@ -1001,7 +1001,7 @@ export default function App() {
               Base de Datos Original Desde Cero • Firestore + Auth
             </div>
             <h1 className="text-2xl font-extrabold text-white tracking-tight">
-              Ecosistema de Auditoría Forense CCRD &amp; Big-4
+              basa12-ecosistema — Auditoría Forense CCRD &amp; Big-4
             </h1>
             <p className="text-xs sm:text-sm text-slate-400 leading-relaxed">
               Inicia sesión con tu cuenta oficial de Google para habilitar tu espacio privado de{' '}
@@ -1128,7 +1128,7 @@ export default function App() {
                 🔬
               </div>
               <div>
-                <h1 className="font-bold text-sm text-white tracking-tight">ECOSISTEMA FORENSE</h1>
+                <h1 className="font-bold text-sm text-white tracking-tight">basa12-ecosistema</h1>
                 <span className="text-[10px] text-emerald-400 font-mono">PRODUCCIÓN • DATOS REALES</span>
               </div>
             </div>
@@ -1267,7 +1267,7 @@ export default function App() {
                 Entorno Limpio de Producción • Cero Datos Demo • Flujo Pericial IA Paso a Paso
               </div>
               <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
-                🔬 Ecosistema de Auditoría Forense e Inteligencia de Datos
+                basa12-ecosistema · Auditoría Forense e Inteligencia de Datos
               </h1>
               <p className="text-xs sm:text-sm text-slate-400 mt-1 max-w-3xl">
                 Registra tu entidad real, extrae documentos o portales web literalmente, audita el Ciclo de Pagos y edita cualquier campo con asistencia paso a paso de IA.

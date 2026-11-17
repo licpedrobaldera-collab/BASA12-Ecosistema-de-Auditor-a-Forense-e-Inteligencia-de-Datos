@@ -45,30 +45,54 @@ export function exportCcrdLiteralMatrixExcel(params: {
 
   const wb = XLSX.utils.book_new();
 
-  // Sheet 1: Complete 3.01+ Literal Matrix (Sorted by idHallazgo / hierarchy)
+  // Sheet 1: Complete 22-Column V2 Matrix (Sorted / reconstructed from Fases 1–4)
   const matrixRows = hallazgos.map((h) => ({
-    'ID Acápite / Hallazgo': h.idHallazgo,
-    'Título del Hallazgo': h.titulo,
-    'Estado de Verificación': h.estado,
-    'Nivel de Riesgo': h.nivelRiesgo || (h.estado === 'Correcto / Cumple' ? 'Bajo (Menor)' : 'Medio (Moderado)'),
-    'Calificación (0-10)': Number(h.puntaje0a10.toFixed(1)),
-    'Referencia Exacta': h.referenciaExacta || h.origenDocumento || 'Expediente',
-    'Nivel Jerárquico Criterio': HIERARCHY_LABELS[h.jerarquiaCriterio] || h.jerarquiaCriterio,
-    'Condición Literal (Documento Real)': h.condicionLiteral,
-    'Criterio Original del Auditor': h.criterioAuditorOriginal || '',
-    'Criterio (Lo que debe ser) — Artículos y Normas Puntuales': h.criterioTexto,
-    'Artículos y Normas Puntuales Aplicables': (h.leyesCitadas || [])
-      .map((l) => `${l.norma}${l.articulo ? ` (${l.articulo})` : ''}`)
-      .join(' | '),
-    'Causa Raíz': h.causa,
-    'Efecto / Riesgo Institucional': h.efecto,
-    'Resultado del Análisis del Supervisor / Revisor': h.recomendacionSupervisor,
-    'Plan de Acción Correctivo': h.planAccionCorrectivo,
-    'Área Responsable': h.responsableArea,
-    'Entregable Requerido': h.entregable,
-    'Director / Titular Período': h.directorResponsable || 'Por asignar',
-    'Alerta Duplicidad': h.esDuplicado ? `SÍ: ${h.detalleDuplicidad || 'Revisar'}` : 'No',
-    'Origen Documental': h.origenDocumento || 'Expediente',
+    Código: h.idHallazgo,
+    'Hallazgo actual': h.titulo,
+    'Transcripción íntegra': (h.transcripcionIntegra || h.condicionLiteral || '').slice(0, 32000),
+    Condición: h.condicionLiteral,
+    Criterio: h.criterioTexto,
+    Comparación: h.comparacion || 'Contrastado frente al marco normativo aplicable.',
+    Causa: h.causa,
+    Efecto: h.efecto,
+    Riesgo: h.riesgoDetalle || h.nivelRiesgo || (h.estado === 'Correcto / Cumple' ? 'Bajo (Menor)' : 'Medio (Moderado)'),
+    Evidencia: h.evidenciaSoporte || h.origenDocumento || 'Expediente',
+    Cuantificación: h.cuantificacion || 'Por determinar según alcance',
+    Responsabilidad: h.responsabilidadDetalle || `${h.responsableArea || 'Área auditada'}${h.directorResponsable ? ` (${h.directorResponsable})` : ''}`,
+    'Recomendación actual': h.recomendacionSupervisor,
+    Deficiencias: h.deficienciasRedaccion || h.planAccionCorrectivo || '',
+    Duplicidad:
+      typeof h.duplicidadMax === 'number' && h.duplicidadMax > 0
+        ? `${Math.round(h.duplicidadMax * 100)}%`
+        : h.esDuplicado
+        ? 'Detectada'
+        : '0%',
+    'Hallazgo relacionado': h.hallazgoRelacionado || '',
+    'Justificación de conservar/eliminar/consolidar':
+      h.justificacionDecision ||
+      `${h.estadoRecomendado || h.estado} (${Number(h.puntaje0a10 || 0).toFixed(1)}/10)`,
+    'Puntaje 0–10': Number((Number(h.puntaje0a10) || 0).toFixed(1)),
+    Nivel:
+      h.nivelSolidezV2 ||
+      (Number(h.puntaje0a10) <= 3.5
+        ? 'DEFICIENTE'
+        : Number(h.puntaje0a10) <= 5.5
+        ? 'RECONSTRUIR'
+        : Number(h.puntaje0a10) <= 7.5
+        ? 'ACEPTABLE CON MEJORAS'
+        : Number(h.puntaje0a10) <= 9.2
+        ? 'BUENO'
+        : 'ÓPTIMO'),
+    'Qué falta para 10/10': h.queFaltaPara10 || h.planAccionCorrectivo || '',
+    'Versión mejorada 10/10': (h.versionMejorada10 || h.condicionLiteral || '').slice(0, 32000),
+    'Referencias normativas':
+      (h.leyesCitadas || [])
+        .map((l) => `${l.norma}${l.articulo ? ` (${l.articulo})` : ''}`)
+        .join(' | ') || h.criterioAuditorOriginal || '',
+    Ubicación:
+      h.ubicacionExacta ||
+      h.referenciaExacta ||
+      `${h.seccionPadre || '3.x'} | ${HIERARCHY_LABELS[h.jerarquiaCriterio] || h.jerarquiaCriterio}`,
   }));
 
   const wsMatrix = XLSX.utils.json_to_sheet(
@@ -76,29 +100,35 @@ export function exportCcrdLiteralMatrixExcel(params: {
       ? matrixRows
       : [
           {
-            'ID Acápite / Hallazgo': 'Sin registros',
-            'Título del Hallazgo': 'No hay hallazgos 3.01+ extraídos todavía',
+            Código: 'Sin registros',
+            'Hallazgo actual': 'No hay hallazgos 3.01+ extraídos todavía',
           },
         ]
   );
   wsMatrix['!cols'] = [
-    { wch: 16 },
-    { wch: 30 },
-    { wch: 24 },
     { wch: 14 },
-    { wch: 26 },
-    { wch: 50 },
-    { wch: 45 },
-    { wch: 35 },
-    { wch: 35 },
-    { wch: 45 },
-    { wch: 45 },
-    { wch: 22 },
-    { wch: 26 },
+    { wch: 32 },
+    { wch: 52 },
+    { wch: 44 },
+    { wch: 44 },
+    { wch: 36 },
     { wch: 34 },
+    { wch: 34 },
+    { wch: 28 },
+    { wch: 36 },
+    { wch: 28 },
+    { wch: 32 },
+    { wch: 44 },
+    { wch: 36 },
+    { wch: 14 },
+    { wch: 18 },
+    { wch: 42 },
+    { wch: 14 },
     { wch: 22 },
-    { wch: 20 },
-    { wch: 22 },
+    { wch: 44 },
+    { wch: 52 },
+    { wch: 44 },
+    { wch: 32 },
   ];
   XLSX.utils.book_append_sheet(wb, wsMatrix, 'Matriz_3_01_Literal');
 

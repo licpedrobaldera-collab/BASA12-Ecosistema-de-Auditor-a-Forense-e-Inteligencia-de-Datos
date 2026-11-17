@@ -12,6 +12,7 @@ import {
   Lightbulb,
   BookOpen,
   FileCheck2,
+  FileDown,
 } from 'lucide-react';
 import {
   AuditedEntity,
@@ -29,6 +30,7 @@ import {
   PaymentCycleRow,
 } from '../types/forensic';
 import { downloadSupervisorWordReport, downloadWordReport } from '../utils/exportWord';
+import { downloadTechnicalPdfReport } from '../utils/exportPdf';
 import { formatCurrency } from '../utils/entities';
 
 interface Props {
@@ -133,6 +135,41 @@ export const ResultsSection: React.FC<Props> = ({
 
         <div className="flex flex-wrap gap-2">
           <button
+            type="button"
+            onClick={() =>
+              downloadTechnicalPdfReport({
+                nombreCaso,
+                origenes,
+                requerimiento,
+                selloDigital: resultado.digitalHash,
+                resultado,
+                entity,
+                auditor,
+                periodo,
+                paisNormativa,
+                simboloMoneda,
+                observaciones,
+                hallazgosLiteral,
+                duplicidades,
+                ccrdStages,
+                directors,
+                legalLibrary,
+                paymentCycleRows,
+                actaLectura,
+                recursos,
+                replicas,
+                contraReplicas,
+              })
+            }
+            className="w-full sm:w-auto px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-2 shadow-lg shadow-rose-950/40 transition-all cursor-pointer"
+            title="Genera informe técnico formal multi-página en PDF con todos los hallazgos, dictamen final y sello SHA-256"
+          >
+            <FileDown className="w-4 h-4" />
+            Exportar Informe Técnico (.pdf)
+          </button>
+
+          <button
+            type="button"
             onClick={() =>
               downloadWordReport({
                 nombreCaso,
@@ -161,6 +198,7 @@ export const ResultsSection: React.FC<Props> = ({
           </button>
 
           <button
+            type="button"
             onClick={() =>
               downloadSupervisorWordReport({
                 nombreCaso,

@@ -452,7 +452,15 @@ function buildProjectFirestorePayload(cs: CaseSession, ownerUid: string, uploads
     contraReplicas: (cs.contraReplicas || []).slice(0, 60).map((r) => trimDossierItem(r, 'Contra-Réplica')),
     directors: (cs.directors || []).slice(0, 60),
     preReviewReports: cs.preReviewReports ? stripUndefinedDeep(cs.preReviewReports) : {},
-    matrizHallazgosLiteral: (cs.matrizHallazgosLiteral || []).slice(0, 250),
+    matrizHallazgosLiteral: (cs.matrizHallazgosLiteral || []).slice(0, 250).map((h) => {
+      const count = Math.max(1, Math.min(250, (cs.matrizHallazgosLiteral || []).length));
+      const maxTrans = Math.max(1200, Math.floor(280000 / count));
+      return {
+        ...h,
+        transcripcionIntegra: h.transcripcionIntegra ? String(h.transcripcionIntegra).slice(0, maxTrans) : undefined,
+        versionMejorada10: h.versionMejorada10 ? String(h.versionMejorada10).slice(0, Math.min(3500, maxTrans)) : undefined,
+      };
+    }),
     legalLibrary: (cs.legalLibrary || []).slice(0, 120).map((l) => ({
       ...l,
       textoExtraido: l.textoExtraido ? String(l.textoExtraido).slice(0, 12000) : '',
@@ -698,7 +706,7 @@ export async function saveUploadToFirestore(params: {
   const uploadId = sanitizeDocId(`upl-${Date.now()}-${evidenceFile.sha256.slice(0, 8)}`, 'upl');
   const path = `projects/${safeProjId}/uploads/${uploadId}`;
 
-  const safeText = String(evidenceFile.extractedText || '').slice(0, 260000);
+  const safeText = String(evidenceFile.extractedText || '').slice(0, 350000);
   const safeRows = stripUndefinedDeep((evidenceFile.extractedRows || []).slice(0, 250));
   const safeNumbers = (evidenceFile.numericAmounts || [])
     .filter((n) => typeof n === 'number' && Number.isFinite(n))

@@ -278,6 +278,27 @@ export interface HallazgoMatrizLiteral {
   origenDocumento?: string;
   directorResponsable?: string;
   etapaCcrd?: 1 | 2 | 3 | 4;
+  // V2 Full — Reconstrucción íntegra y evaluación de 13 elementos
+  seccionPadre?: string;
+  ubicacionExacta?: string;
+  transcripcionIntegra?: string;
+  comparacion?: string;
+  riesgoDetalle?: string;
+  evidenciaSoporte?: string;
+  cuantificacion?: string;
+  responsabilidadDetalle?: string;
+  deficienciasRedaccion?: string;
+  estadoRecomendado?:
+    | 'CONSERVAR'
+    | 'MEJORAR'
+    | 'RECONSTRUIR'
+    | 'ELIMINAR/CONSOLIDAR — REVISIÓN PROFESIONAL';
+  nivelSolidezV2?: 'DEFICIENTE' | 'RECONSTRUIR' | 'ACEPTABLE CON MEJORAS' | 'BUENO' | 'ÓPTIMO';
+  duplicidadMax?: number;
+  hallazgoRelacionado?: string;
+  justificacionDecision?: string;
+  queFaltaPara10?: string;
+  versionMejorada10?: string;
 }
 
 export interface DuplicityFinding {

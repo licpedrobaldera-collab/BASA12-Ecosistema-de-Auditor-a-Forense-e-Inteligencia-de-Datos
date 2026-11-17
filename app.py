@@ -1,3 +1,5 @@
+import os
+import io
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -35,7 +37,13 @@ def init_db():
 engine = init_db()
 
 def get_gemini_client():
-    api_key = st.secrets.get("GEMINI_API_KEY", "")
+    api_key = ""
+    try:
+        api_key = st.secrets.get("GEMINI_API_KEY", "")
+    except Exception:
+        api_key = ""
+    if not api_key:
+        api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
         return None
     return genai.Client(api_key=api_key)
@@ -45,20 +53,28 @@ def calcular_hash(contenido_bytes):
 
 def extraer_texto_archivo(archivo):
     nombre = archivo.name.lower()
+    raw_bytes = archivo.getvalue()
+    buffer = io.BytesIO(raw_bytes)
     if nombre.endswith(".pdf"):
-        lector = PdfReader(archivo)
+        lector = PdfReader(buffer)
         return "\n".join([pagina.extract_text() or "" for pagina in lector.pages])
     elif nombre.endswith(".docx"):
-        documento = docx.Document(archivo)
-        return "\n".join([parrafo.text for parrafo in documento.paragraphs])
+        documento = docx.Document(buffer)
+        partes = [p.text for p in documento.paragraphs if p.text.strip()]
+        for tabla in documento.tables:
+            for fila in tabla.rows:
+                celdas = [c.text.strip() for c in fila.cells if c.text.strip()]
+                if celdas:
+                    partes.append(" | ".join(celdas))
+        return "\n".join(partes)
     elif nombre.endswith(".xlsx") or nombre.endswith(".xls"):
-        df = pd.read_excel(archivo)
+        df = pd.read_excel(buffer)
         return df.to_string()
     elif nombre.endswith(".csv"):
-        df = pd.read_csv(archivo)
+        df = pd.read_csv(buffer)
         return df.to_string()
     else:
-        return archivo.getvalue().decode("utf-8", errors="ignore")
+        return raw_bytes.decode("utf-8", errors="ignore")
 
 if "texto_extraido" not in st.session_state:
     st.session_state.texto_extraido = ""
@@ -171,7 +187,10 @@ with tab3:
         try:
             numeros = [abs(float(x.strip())) for x in datos_ejemplo.split(",") if x.strip() and float(x.strip()) != 0]
             arr = np.array(numeros)
-            primeros_digitos = [int(str(n).replace(".", "").lstrip("0")[0]) for n in arr]
+            primeros_digitos = [
+                int(next((c for c in f"{float(n):.10f}" if c.isdigit() and c != "0"), "1"))
+                for n in arr
+            ]
             conteo = pd.Series(primeros_digitos).value_counts().reindex(range(1, 10), fill_value=0)
             frecuencia_real = (conteo / len(primeros_digitos)) * 100
             benford_teorico = np.log10(1 + 1 / np.arange(1, 10)) * 100

@@ -9,6 +9,12 @@ import { fileURLToPath } from 'url';
 import * as XLSX from 'xlsx';
 import mammoth from 'mammoth';
 import { extractText as extractPdfText } from 'unpdf';
+import {
+  buildBasaV2FullZipBuffer,
+  evaluateFindingDocumentaryV2,
+  extractDocxStructuredBlocks,
+  reconstructFindingsV2,
+} from './server/basaV2Package';
 
 dotenv.config();
 
@@ -211,11 +217,19 @@ async function parseBufferByType(buffer: Buffer, fileName: string, mimeType: str
     }
     extractedText = textParts.join('\n\n');
   }
-  // 2. WORD (.docx, .docm)
+  // 2. WORD (.docx, .docm) — Fase 1: Párrafos [Párrafo N] y Tablas [Tabla T, Fila R] en orden real
   else if (['.docx', '.docm'].includes(ext) || mimeType.includes('wordprocessingml')) {
     parsedFormat = 'WORD (.DOCX)';
-    const result = await mammoth.extractRawText({ buffer });
-    extractedText = (result.value || '').trim();
+    try {
+      const structured = await extractDocxStructuredBlocks(buffer);
+      extractedText = structured.taggedText.trim();
+    } catch (docxXmlErr) {
+      console.warn('DOCX XML structured extractor fallback to mammoth:', docxXmlErr);
+    }
+    if (!extractedText) {
+      const result = await mammoth.extractRawText({ buffer });
+      extractedText = (result.value || '').trim();
+    }
     numericAmounts = extractNumericAmountsFromText(extractedText);
   }
   // 3. PDF (.pdf)
@@ -360,7 +374,7 @@ async function parseBufferByType(buffer: Buffer, fileName: string, mimeType: str
     parsedFormat,
     pageCount,
     sheetNames,
-    extractedText: extractedText.slice(0, 120000),
+    extractedText: extractedText.slice(0, 2000000),
     contentSnippet: extractedText.slice(0, 1000),
     extractedRows: extractedRows.slice(0, 500),
     numericAmounts: numericAmounts.slice(0, 1000),
@@ -2105,87 +2119,79 @@ app.post('/api/forensic/extract-hallazgos-ccrd', async (req, res) => {
       });
     }
 
-    // Programmatic extraction first: capture verbatim headings 3.01+, 3.1.xx, Hallazgo, Observación
-    const lines = combinedText.split(/\r?\n/);
-    const verbatimBlocks: { idCode: string; title: string; rawBlock: string }[] = [];
-    const headingRegex = /^\s*((?:3\.(?:0?\d+(?:\.\d+)*))|(?:hallazgo|observaci[oó]n)\s*(?:n[uú]m\.?|no\.?|#)?\s*\d+(?:\.\d+)*)\b[\s:.-]*(.*)$/i;
-
-    for (let i = 0; i < lines.length; i++) {
-      const m = lines[i].match(headingRegex);
-      if (m) {
-        const idCode = m[1].trim();
-        const titlePart = m[2].trim();
-        const snippetLines: string[] = [lines[i].trim()];
-        for (let j = i + 1; j < Math.min(lines.length, i + 18); j++) {
-          if (lines[j].match(headingRegex)) break;
-          if (lines[j].trim()) snippetLines.push(lines[j].trim());
-        }
-        verbatimBlocks.push({
-          idCode,
-          title: titlePart || `Acápite ${idCode}`,
-          rawBlock: snippetLines.join('\n'),
-        });
-      }
-    }
+    // =========================================================================
+    // FASES 1–3: EXTRACCIÓN + IDENTIFICACIÓN PRECISA (Secciones vs Hallazgos) + TRANSCRIPCIÓN ÍNTEGRA
+    // =========================================================================
+    const reconstructed = reconstructFindingsV2(combinedText);
+    const v2Findings = reconstructed.findings;
 
     const ai = getAiClient();
-    let aiHallazgos: any[] = [];
-    let modelUsed = 'deterministic-parser';
+    const aiEvaluatedByCode = new Map<string, any>();
+    let aiHallazgosUnstructured: any[] = [];
+    let modelUsed = 'motor-documental-profesional-v2';
 
-    if (ai) {
+    if (ai && v2Findings.length > 0) {
       try {
-        // Chunk large documents so we NEVER lose or cap findings at 16 or 30 (unlimited extraction)
-        const CHUNK_SIZE = 32000;
-        const chunks: string[] = [];
-        for (let offset = 0; offset < combinedText.length; offset += CHUNK_SIZE) {
-          chunks.push(combinedText.slice(offset, offset + CHUNK_SIZE));
-        }
+        // Fase 4: Evaluar el HALLAZGO COMPLETO (transcripcionIntegra), en lotes de 4 para evitar truncamiento
+        const BATCH_SIZE = 4;
+        for (let bStart = 0; bStart < v2Findings.length; bStart += BATCH_SIZE) {
+          const batch = v2Findings.slice(bStart, bStart + BATCH_SIZE);
+          const payloadBatch = batch.map((f) => ({
+            codigo: f.codigo,
+            seccionPadre: f.seccionPadre,
+            ubicacionExacta: f.ubicacionExacta,
+            titulo: f.titulo,
+            normasDetectadasEnTexto: f.normasDetectadas,
+            transcripcionIntegra: f.transcripcionIntegra.slice(0, 11000),
+          }));
 
-        const seenChunkKeys = new Set<string>();
-        for (let cIdx = 0; cIdx < chunks.length; cIdx++) {
-          const chunkText = chunks[cIdx];
           const promptText = `
-[EXTRACCIÓN LITERAL ILIMITADA DE HALLAZGOS — SIN LÍMITE NUMÉRICO (TODOS LOS EXISTENTES EN EL DOCUMENTO)]
+[FASE 4 — EVALUACIÓN FORENSE V2 SOBRE EL HALLAZGO COMPLETO (13 ELEMENTOS + 22 COLUMNAS)]
 Entidad Auditada: ${entityName}
 Jurisdicción: ${paisNormativa}
 Período: ${periodo?.fechaDesde || 'N/D'} al ${periodo?.fechaHasta || 'N/D'}
-Bloque Documental: ${cIdx + 1} de ${chunks.length}
+Lote de Hallazgos Reconstruidos: ${Math.floor(bStart / BATCH_SIZE) + 1} de ${Math.ceil(v2Findings.length / BATCH_SIZE)}
 
-REGLA ESTRICTA DE INTEGRIDAD Y COMPLETITUD (INFINITO / ABIERTO):
-1. Extrae TODOS los acápites y hallazgos presentes en este bloque documental SIN LÍMITE FIJO (NO te detengas en 16 ni omitas ningún acápite; si hay 3, 25, 60 o más en todo el informe, extrae absolutamente todos). Respeta la numeración original (3.01, 3.1.01, Hallazgo 1, Observación A, etc.).
-2. NO inventes hechos, cifras ni fechas que no figuren en el documento real.
-3. Redacta en tono exclusivo de SUPERVISOR / REVISOR TÉCNICO DE AUDITORÍA GUBERNAMENTAL (NUNCA menciones "IA", "inteligencia artificial" ni "modelo" en ningún campo).
-4. CRITERIO ("LO QUE DEBE SER"): En "criterioTexto" y en "leyesCitadas", especifica OBLIGATORIAMENTE los ARTÍCULOS, NUMERALES, LITERALES y NORMAS PUNTUALES que aplican como "Lo que debe ser" en estricto Orden Jerárquico:
-   1 = CONSTITUCION, 2 = TRATADOS_ISSAI_NIA, 3 = LEY, 4 = DECRETO, 5 = RESOLUCION_NOBACI, 6 = NORMATIVA_INTERNA.
-5. Referencia normativa base aplicable en RD: Ley 18-24 (Arts. 10, 25, 38), Ley 340-06 (Arts. 32, 33), Ley 41-08 (Art. 8 num. 12 y Art. 50), Ley 311-14 (Arts. 1-5), Decreto 527-09 (Art. 3), Ley 498-06 (Arts. 24, 25.d), Decreto 543-12 (Art. 31), Normas NOBACI / NOBIS (ADC-3-006 nums. 4, 20, 33, 86; ADC-03-004.19; ADC-3-001.3; Ambiente de Control y Activos Fijos), Ley 10-04, NICSP 19 y Ley 64-00.
+INSTRUCCIONES CRÍTICAS DE PRECISIÓN:
+1. Recibes la TRANSCRIPCIÓN ÍNTEGRA completa de cada hallazgo (no solo el título). Evalúa TODOS sus párrafos, literales (a, b, c), leyes, decretos, resoluciones NOBACI, POA/PACC, comunicaciones de funcionarios y evidencias descritas.
+2. NO inventes hechos, montos ni normas ausentes en la transcripción. Conserva fielmente las referencias normativas reales citadas en el texto (ej. Ley 41-08, Decreto 527-09, Decreto 543-12, Ley 18-24, NOBACI, etc.).
+3. Sé JUSTO Y RIGUROSO en "puntaje0a10": si el hallazgo contiene condición fáctica clara, normas puntuales, evidencias, comunicaciones y desarrollo sustantivo, NO lo califiques falsamente con 3/10; asígnale su puntaje real (ej. 6.5 a 9.5 según lo que efectivamente contenga y lo que falte para 10/10).
+4. Redacta en tono exclusivo de SUPERVISOR / REVISOR TÉCNICO (sin mencionar IA ni Gemini).
 
-${cIdx === 0 && verbatimBlocks.length > 0 ? `ÍNDICE DE BLOQUES DETECTADOS (${verbatimBlocks.length} totales):\n${JSON.stringify(verbatimBlocks.map((b) => ({ idCode: b.idCode, title: b.title })), null, 2)}\n` : ''}
+HALLAZGOS RECONSTRUIDOS (TEXTO ÍNTEGRO):
+${JSON.stringify(payloadBatch, null, 2)}
 
-[TEXTO REAL DEL DOCUMENTO — BLOQUE ${cIdx + 1}/${chunks.length}]:
-${chunkText}
-
-Devuelve JSON estricto con esta estructura:
+Devuelve JSON estricto evaluando LOS 13 ELEMENTOS para cada código del lote:
 {
-  "hallazgos": [
+  "evaluaciones": [
     {
-      "idHallazgo": "Código exacto (ej. 3.01, 3.1.01, H-01)",
-      "titulo": "Título literal o exacto del acápite",
-      "condicionLiteral": "Extracto textual de lo que existe en el documento cargado sin alterar hechos.",
-      "criterioAuditorOriginal": "Criterio citado originalmente en el borrador/documento (si existe).",
-      "criterioTexto": "Lo que debe ser: Cita puntual de artículos, numerales y normas aplicables en orden jerárquico.",
-      "jerarquiaCriterio": "LEY | DECRETO | RESOLUCION_NOBACI | TRATADOS_ISSAI_NIA | CONSTITUCION | NORMATIVA_INTERNA",
+      "codigo": "Código exacto recibido (ej. 3.1.01)",
+      "condicionLiteral": "¿Qué ocurrió realmente según la transcripción íntegra?",
+      "criterioAuditorOriginal": "Criterio citado originalmente en la transcripción",
+      "criterioTexto": "Normas, artículos, decretos y resoluciones exactas aplicables (orden jerárquico)",
+      "jerarquiaCriterio": "CONSTITUCION | TRATADOS_ISSAI_NIA | LEY | DECRETO | RESOLUCION_NOBACI | NORMATIVA_INTERNA",
+      "comparacion": "¿La condición contradice el criterio? Explica cómo.",
+      "causa": "¿Por qué ocurrió según el desarrollo del hallazgo?",
+      "efecto": "¿Qué consecuencia produjo o produce?",
+      "riesgoDetalle": "¿Qué riesgo institucional, financiero o de control genera?",
       "nivelRiesgo": "Alto (Crítico) | Medio (Moderado) | Bajo (Menor)",
-      "referenciaExacta": "Página, sección o documento origen exacto donde consta",
-      "causa": "Causa raíz identificada en el documento",
-      "efecto": "Impacto o riesgo institucional/financiero",
-      "estado": "Correcto / Cumple | Con Observación / Mejora",
-      "puntaje0a10": 7.5,
-      "recomendacionSupervisor": "Recomendación técnica del Supervisor/Revisor basada exclusivamente en el hallazgo real para lograr 10/10.",
+      "evidenciaSoporte": "¿Qué documentos, actas, oficios o comunicaciones sustentan la conclusión?",
+      "cuantificacion": "¿Existe monto, universo, muestra, período o impacto cuantificado?",
+      "responsabilidadDetalle": "¿Está correctamente atribuida y sustentada por unidad, cargo y período?",
+      "recomendacionSupervisor": "Recomendación CCRD (60-90 palabras) al Titular/MAE iniciando con 'Instruir a...' y citando base legal real.",
+      "deficienciasRedaccion": "¿Es objetiva, precisa y demostrable o qué debilidades técnicas presenta?",
+      "puntaje0a10": 8.0,
+      "nivelSolidezV2": "DEFICIENTE | RECONSTRUIR | ACEPTABLE CON MEJORAS | BUENO | ÓPTIMO",
+      "estadoRecomendado": "CONSERVAR | MEJORAR | RECONSTRUIR | ELIMINAR/CONSOLIDAR — REVISIÓN PROFESIONAL",
+      "justificacionDecision": "Justificación técnica de por qué conservar, mejorar, reconstruir o consolidar.",
+      "queFaltaPara10": "Elementos exactos que faltan para lograr un hallazgo 10/10.",
+      "versionMejorada10": "Versión técnica integral 10/10 lista para informe oficial.",
       "planAccionCorrectivo": "Pasos concretos de subsanación",
-      "responsableArea": "Área institucional responsable",
-      "entregable": "Manual, política o evidencia documental requerida",
+      "responsableArea": "Área responsable",
+      "entregable": "Evidencia o instrumento requerido",
+      "estado": "Correcto / Cumple | Con Observación / Mejora",
       "leyesCitadas": [
-        { "norma": "Ley núm. 41-08", "articulo": "Art. 8, num. 12", "jerarquia": "LEY" }
+        { "norma": "Ley núm. ...", "articulo": "Art(s). ...", "jerarquia": "LEY" }
       ]
     }
   ]
@@ -2195,48 +2201,162 @@ Devuelve JSON estricto con esta estructura:
             contents: promptText,
             config: { responseMimeType: 'application/json' },
           });
+          modelUsed = `${resp.modelUsed} (V2-4Fases)`;
+          const parsed = parseJsonSafe<any>(resp.response.text || '{}', { evaluaciones: [] });
+          if (Array.isArray(parsed.evaluaciones)) {
+            for (const ev of parsed.evaluaciones) {
+              if (ev?.codigo) {
+                aiEvaluatedByCode.set(String(ev.codigo).trim().toLowerCase(), ev);
+              }
+            }
+          }
+        }
+      } catch (aiBatchErr) {
+        console.warn('V2 batch AI evaluation fallback to documentary engine:', aiBatchErr);
+      }
+    } else if (ai && v2Findings.length === 0) {
+      // Fallback for free-form documents lacking numbered 3.01 / 3.1.01 headers
+      try {
+        const CHUNK_SIZE = 32000;
+        const chunks: string[] = [];
+        for (let offset = 0; offset < combinedText.length; offset += CHUNK_SIZE) {
+          chunks.push(combinedText.slice(offset, offset + CHUNK_SIZE));
+        }
+        const seenChunkKeys = new Set<string>();
+        for (let cIdx = 0; cIdx < Math.min(chunks.length, 6); cIdx++) {
+          const chunkText = chunks[cIdx];
+          const promptText = `
+[EXTRACCIÓN LITERAL ILIMITADA DE HALLAZGOS — DOCUMENTO SIN NUMERACIÓN ESTÁNDAR]
+Entidad Auditada: ${entityName} | Jurisdicción: ${paisNormativa} | Período: ${periodo?.fechaDesde || 'N/D'} al ${periodo?.fechaHasta || 'N/D'}
+Bloque Documental: ${cIdx + 1} de ${chunks.length}
+
+Extrae TODOS los hallazgos u observaciones reales del bloque evaluando condición, criterio real, comparación, causa, efecto, riesgo, evidencia, cuantificación, responsabilidad, recomendación y puntaje 0–10.
+NO inventes hechos ni normas.
+
+${chunkText}
+
+Devuelve JSON estricto:
+{
+  "hallazgos": [
+    {
+      "idHallazgo": "3.01",
+      "titulo": "Título exacto",
+      "condicionLiteral": "Texto real del documento",
+      "criterioTexto": "Normas aplicables",
+      "jerarquiaCriterio": "LEY | DECRETO | RESOLUCION_NOBACI | TRATADOS_ISSAI_NIA | CONSTITUCION | NORMATIVA_INTERNA",
+      "comparacion": "Contraste condición vs criterio",
+      "causa": "Causa raíz",
+      "efecto": "Efecto",
+      "riesgoDetalle": "Riesgo",
+      "evidenciaSoporte": "Evidencia citada",
+      "cuantificacion": "Cuantificación",
+      "responsabilidadDetalle": "Responsabilidad",
+      "nivelRiesgo": "Alto (Crítico) | Medio (Moderado) | Bajo (Menor)",
+      "referenciaExacta": "Ubicación en documento",
+      "estado": "Correcto / Cumple | Con Observación / Mejora",
+      "puntaje0a10": 7.5,
+      "recomendacionSupervisor": "Recomendación CCRD (60-90 palabras) al Titular/MAE",
+      "planAccionCorrectivo": "Pasos correctivos",
+      "responsableArea": "Área",
+      "entregable": "Entregable",
+      "leyesCitadas": [{ "norma": "Ley núm. 18-24", "articulo": "Art. 10", "jerarquia": "LEY" }]
+    }
+  ]
+}
+`;
+          const resp = await callGeminiWithResilience(ai, {
+            contents: promptText,
+            config: { responseMimeType: 'application/json' },
+          });
+          modelUsed = resp.modelUsed;
           const parsed = parseJsonSafe<any>(resp.response.text || '{}', { hallazgos: [] });
           if (Array.isArray(parsed.hallazgos)) {
-            modelUsed = resp.modelUsed;
             for (const item of parsed.hallazgos) {
               const dedupKey = `${String(item.idHallazgo || '').toLowerCase()}_${String(item.titulo || '').toLowerCase().slice(0, 40)}`;
               if (!seenChunkKeys.has(dedupKey)) {
                 seenChunkKeys.add(dedupKey);
-                aiHallazgos.push(item);
+                aiHallazgosUnstructured.push(item);
               }
             }
           }
         }
       } catch (aiErr) {
-        console.warn('extract-hallazgos-ccrd AI fallback to verbatim parser:', aiErr);
+        console.warn('Unstructured extract-hallazgos-ccrd AI fallback:', aiErr);
       }
     }
 
-    const rawSourceList = aiHallazgos.length > 0 ? aiHallazgos : verbatimBlocks.map((b) => {
-      const isObs = /debilidad|incumplimiento|ausencia|fuera de plazo|error|diferencia|sin\s+|vencid/i.test(b.rawBlock);
-      const crit = inferGranularCriteria(`${b.title} ${b.rawBlock}`);
-      return {
-        idHallazgo: b.idCode,
-        titulo: b.title,
-        condicionLiteral: b.rawBlock,
-        criterioAuditorOriginal: 'Verificado en texto original cargado',
-        criterioTexto: crit.criterioTexto,
-        jerarquiaCriterio: inferHierarchy(b.rawBlock).level,
-        nivelRiesgo: isObs ? 'Alto (Crítico)' : 'Bajo (Menor)',
-        referenciaExacta: `Acápite ${b.idCode}`,
-        causa: 'Pendiente de determinación detallada en campo.',
-        efecto: 'Exposición operativa o de cumplimiento normativo.',
-        estado: isObs ? 'Con Observación / Mejora' : 'Correcto / Cumple',
-        puntaje0a10: isObs ? 6.5 : 10,
-        recomendacionSupervisor: 'Validar evidencia soporte y documentar plan correctivo conforme a NOBACI y Ley núm. 18-24.',
-        planAccionCorrectivo: 'Subsanar brecha documental y actualizar registros institucionales.',
-        responsableArea: 'Área Auditada Responsable',
-        entregable: 'Informe de cumplimiento y soporte documental',
-        leyesCitadas: crit.leyesCitadas,
-      };
-    });
+    const rawSourceList =
+      v2Findings.length > 0
+        ? v2Findings.map((f) => {
+            const docEval = evaluateFindingDocumentaryV2(f, v2Findings);
+            const aiEv = aiEvaluatedByCode.get(f.codigo.toLowerCase());
+            const mergedLeyes =
+              Array.isArray(aiEv?.leyesCitadas) && aiEv.leyesCitadas.length > 0
+                ? aiEv.leyesCitadas
+                : f.normasDetectadas.length > 0
+                ? f.normasDetectadas
+                : inferGranularCriteria(f.transcripcionIntegra).leyesCitadas;
 
-    // Open fallback without artificial 16-item cap: process ALL detected document paragraphs/sections
+            const finalScore =
+              typeof aiEv?.puntaje0a10 === 'number' && !Number.isNaN(aiEv.puntaje0a10)
+                ? Math.max(0, Math.min(10, Number(aiEv.puntaje0a10)))
+                : docEval.puntaje0a10;
+
+            const estadoRec = ['CONSERVAR', 'MEJORAR', 'RECONSTRUIR', 'ELIMINAR/CONSOLIDAR — REVISIÓN PROFESIONAL'].includes(
+              aiEv?.estadoRecomendado
+            )
+              ? aiEv.estadoRecomendado
+              : docEval.estadoRecomendado;
+
+            const inferredRisk =
+              aiEv?.nivelRiesgo ||
+              (finalScore <= 5.5 ? 'Alto (Crítico)' : finalScore <= 8.2 ? 'Medio (Moderado)' : 'Bajo (Menor)');
+
+            return {
+              idHallazgo: f.codigo,
+              seccionPadre: f.seccionPadre,
+              ubicacionExacta: f.ubicacionExacta,
+              referenciaExacta: `${f.seccionPadre} | ${f.ubicacionExacta}`,
+              titulo: f.titulo,
+              transcripcionIntegra: f.transcripcionIntegra,
+              condicionLiteral: String(aiEv?.condicionLiteral || docEval.condicionLiteral),
+              criterioAuditorOriginal: String(aiEv?.criterioAuditorOriginal || f.normasDetectadas.map((n) => n.norma).join('; ') || 'Extraído del cuerpo completo'),
+              criterioTexto: String(aiEv?.criterioTexto || docEval.criterioTexto),
+              jerarquiaCriterio: aiEv?.jerarquiaCriterio || inferHierarchy(f.transcripcionIntegra).level,
+              comparacion: String(aiEv?.comparacion || docEval.comparacion),
+              causa: String(aiEv?.causa || docEval.causa),
+              efecto: String(aiEv?.efecto || docEval.efecto),
+              riesgoDetalle: String(aiEv?.riesgoDetalle || docEval.riesgoDetalle),
+              nivelRiesgo: inferredRisk,
+              evidenciaSoporte: String(aiEv?.evidenciaSoporte || docEval.evidenciaSoporte),
+              cuantificacion: String(aiEv?.cuantificacion || docEval.cuantificacion),
+              responsabilidadDetalle: String(aiEv?.responsabilidadDetalle || docEval.responsabilidadDetalle),
+              deficienciasRedaccion: String(aiEv?.deficienciasRedaccion || docEval.deficienciasRedaccion),
+              recomendacionSupervisor: String(
+                aiEv?.recomendacionSupervisor ||
+                  'Instruir a la Máxima Autoridad Ejecutiva y unidades competentes a formalizar los controles internos, documentar evidencia trazable y regularizar las brechas detectadas conforme a la Ley núm. 18-24 y Normas NOBACI.'
+              ),
+              planAccionCorrectivo: String(aiEv?.planAccionCorrectivo || docEval.queFaltaPara10),
+              responsableArea: String(aiEv?.responsableArea || 'Dirección Administrativa / Unidad Competente'),
+              entregable: String(aiEv?.entregable || 'Plan de acción y evidencia verificable'),
+              estado:
+                aiEv?.estado === 'Correcto / Cumple' || estadoRec === 'CONSERVAR'
+                  ? 'Correcto / Cumple'
+                  : 'Con Observación / Mejora',
+              puntaje0a10: finalScore,
+              nivelSolidezV2: aiEv?.nivelSolidezV2 || docEval.nivelSolidezV2,
+              estadoRecomendado: estadoRec,
+              duplicidadMax: docEval.duplicidadMax,
+              hallazgoRelacionado: docEval.hallazgoRelacionado,
+              justificacionDecision: String(aiEv?.justificacionDecision || docEval.justificacionDecision),
+              queFaltaPara10: String(aiEv?.queFaltaPara10 || docEval.queFaltaPara10),
+              versionMejorada10: String(aiEv?.versionMejorada10 || docEval.versionMejorada10),
+              leyesCitadas: mergedLeyes,
+            };
+          })
+        : aiHallazgosUnstructured;
+
+    // Fallback for plain unstructured paragraphs if neither numbered findings nor AI items were found
     const fallbackParagraphs =
       rawSourceList.length === 0
         ? combinedText
@@ -2247,17 +2367,33 @@ Devuelve JSON estricto con esta estructura:
               const crit = inferGranularCriteria(p);
               return {
                 idHallazgo: `3.${String(idx + 1).padStart(2, '0')}`,
+                seccionPadre: '3.x Resultados de Auditoría',
+                ubicacionExacta: `Bloque textual #${idx + 1}`,
+                referenciaExacta: `Bloque textual #${idx + 1}`,
                 titulo: p.trim().split(/\n/)[0].slice(0, 90),
+                transcripcionIntegra: p.trim(),
                 condicionLiteral: p.trim().slice(0, 1400),
                 criterioAuditorOriginal: 'Texto literal del documento',
                 criterioTexto: crit.criterioTexto,
                 jerarquiaCriterio: inferHierarchy(p).level,
-                nivelRiesgo: isObs ? 'Medio (Moderado)' : 'Bajo (Menor)',
-                referenciaExacta: `Bloque textual #${idx + 1}`,
+                comparacion: 'Contrastado contra normativa aplicable.',
                 causa: 'Según texto real suministrado.',
                 efecto: 'Impacto sujeto a validación de supervisión.',
+                riesgoDetalle: 'Exposición operativa y de cumplimiento.',
+                nivelRiesgo: isObs ? 'Medio (Moderado)' : 'Bajo (Menor)',
+                evidenciaSoporte: 'Bloque documental cargado.',
+                cuantificacion: 'Por determinar según alcance.',
+                responsabilidadDetalle: 'Dirección Administrativa / Área Técnica',
+                deficienciasRedaccion: 'Pendiente de desglose completo de atributos CCRD.',
                 estado: isObs ? 'Con Observación / Mejora' : 'Correcto / Cumple',
                 puntaje0a10: isObs ? 7.0 : 9.5,
+                nivelSolidezV2: isObs ? 'ACEPTABLE CON MEJORAS' : 'ÓPTIMO',
+                estadoRecomendado: isObs ? 'MEJORAR' : 'CONSERVAR',
+                duplicidadMax: 0,
+                hallazgoRelacionado: '',
+                justificacionDecision: 'Extraído de texto sin numeración 3.x.',
+                queFaltaPara10: 'Formalizar estructura completa de condición, criterio, evidencia y cuantificación.',
+                versionMejorada10: p.trim(),
                 recomendacionSupervisor: 'Verificar correspondencia con la documentación fuente y sustentar artículos puntuales aplicables.',
                 planAccionCorrectivo: 'Alinear proceso con manuales de control interno NOBACI y marco legal vigente.',
                 responsableArea: 'Dirección Administrativa / Área Técnica',
@@ -2276,7 +2412,7 @@ Devuelve JSON estricto con esta estructura:
       if (/etapa\s*3\b/.test(ref)) return 3;
       if (/etapa\s*4\b/.test(ref)) return 4;
 
-      const factBlob = `${h?.titulo || ''} ${h?.condicionLiteral || ''}`.toLowerCase();
+      const factBlob = `${h?.titulo || ''} ${h?.condicionLiteral || ''} ${h?.transcripcionIntegra || ''}`.slice(0, 2500).toLowerCase();
       if (/acta de lectura|recurso|r[eé]plica|contra-r[eé]plica|descargo|comunicaci[oó]n de hallazgo|debido proceso/.test(factBlob)) {
         return 3;
       }
@@ -2303,18 +2439,34 @@ Devuelve JSON estricto con esta estructura:
       return {
         id: `hz-lit-${Date.now()}-${idx}`,
         idHallazgo: String(h.idHallazgo || `3.${String(idx + 1).padStart(2, '0')}`),
+        seccionPadre: String(h.seccionPadre || '3.x Resultados de Auditoría'),
+        ubicacionExacta: String(h.ubicacionExacta || h.referenciaExacta || `Acápite #${idx + 1}`),
         titulo: String(h.titulo || `Hallazgo ${idx + 1}`),
+        transcripcionIntegra: String(h.transcripcionIntegra || h.condicionLiteral || ''),
         condicionLiteral: String(h.condicionLiteral || ''),
         criterioAuditorOriginal: String(h.criterioAuditorOriginal || ''),
         criterioTexto: String(h.criterioTexto || ''),
         jerarquiaCriterio: (HIERARCHY_ORDER[hLevel] ? hLevel : 'LEY') as any,
         jerarquiaOrden: order,
+        comparacion: String(h.comparacion || ''),
         nivelRiesgo: validRiesgo,
-        referenciaExacta: String(h.referenciaExacta || (informePreliminarText ? 'Informe Preliminar' : 'Documento Cargado')),
+        referenciaExacta: String(h.referenciaExacta || h.ubicacionExacta || (informePreliminarText ? 'Informe Preliminar' : 'Documento Cargado')),
         causa: String(h.causa || ''),
         efecto: String(h.efecto || ''),
+        riesgoDetalle: String(h.riesgoDetalle || ''),
+        evidenciaSoporte: String(h.evidenciaSoporte || ''),
+        cuantificacion: String(h.cuantificacion || ''),
+        responsabilidadDetalle: String(h.responsabilidadDetalle || ''),
+        deficienciasRedaccion: String(h.deficienciasRedaccion || ''),
         estado: h.estado === 'Correcto / Cumple' ? 'Correcto / Cumple' : 'Con Observación / Mejora',
         puntaje0a10: Math.max(0, Math.min(10, Number(h.puntaje0a10) || 7.0)),
+        nivelSolidezV2: h.nivelSolidezV2 || 'ACEPTABLE CON MEJORAS',
+        estadoRecomendado: h.estadoRecomendado || 'MEJORAR',
+        duplicidadMax: Number(h.duplicidadMax) || 0,
+        hallazgoRelacionado: String(h.hallazgoRelacionado || ''),
+        justificacionDecision: String(h.justificacionDecision || ''),
+        queFaltaPara10: String(h.queFaltaPara10 || ''),
+        versionMejorada10: String(h.versionMejorada10 || ''),
         recomendacionSupervisor: String(h.recomendacionSupervisor || ''),
         planAccionCorrectivo: String(h.planAccionCorrectivo || ''),
         responsableArea: String(h.responsableArea || ''),
@@ -2336,15 +2488,15 @@ Devuelve JSON estricto con esta estructura:
         description: 'Recepción de credenciales, análisis preliminar, identificación de titulares (decretos) y evaluación de riesgos/controles NOBACI.',
         keyActions: ['Acreditación del equipo', 'Revisión marco legal jerárquico', 'Identificación de directores por período'],
         status: hasDocs ? 'Completado' : 'En Proceso',
-        evidenciaVerificada: `${directors.length} director(es) registrados; ${combinedText.length} caracteres de expediente procesados.`,
+        evidenciaVerificada: `${directors.length} director(es) registrados; ${reconstructed.sectionsDetected.length} sección(es) y ${reconstructed.blocks.length} bloques extraídos.`,
       },
       {
         step: 2,
         title: 'Ejecución',
         description: 'Aplicación de pruebas sustantivas y de cumplimiento sobre contrataciones, ciclo de pagos, RR. HH. e inventarios.',
-        keyActions: ['Extracción literal 3.01+', 'Pruebas de cumplimiento NOBACI', 'Detección de duplicidades'],
+        keyActions: ['Extracción íntegra 4 Fases', 'Evaluación 13 dimensiones', 'Control de duplicidades'],
         status: normalized.length > 0 ? 'Completado' : hasDocs ? 'En Proceso' : 'Pendiente',
-        evidenciaVerificada: `${normalized.length} acápite(s)/hallazgo(s) extraídos literalmente.`,
+        evidenciaVerificada: `${normalized.length} hallazgo(s) completos evaluados sobre transcripción íntegra.`,
       },
       {
         step: 3,
@@ -2357,10 +2509,10 @@ Devuelve JSON estricto con esta estructura:
       {
         step: 4,
         title: 'Conclusión e Informe Final',
-        description: 'Consolidación de dictamen del Supervisor/Revisor, recomendaciones correctivas y matriz aprobada para remisión oficial.',
-        keyActions: ['Revisión previa QA', 'Cierre de hallazgos', 'Emisión Word/Excel oficial'],
+        description: 'Consolidación de dictamen del Supervisor/Revisor, recomendaciones correctivas y matriz 22 columnas aprobada para remisión oficial.',
+        keyActions: ['Revisión previa QA', 'Cierre de hallazgos', 'Emisión PDF/Word/Excel oficial'],
         status: normalized.length > 0 && hasContradiccion ? 'En Proceso' : 'Pendiente',
-        evidenciaVerificada: 'Listo para revisión previa y emisión de Informe del Supervisor.',
+        evidenciaVerificada: 'Listo para revisión previa y emisión de Informe Técnico.',
       },
     ];
 
@@ -2368,12 +2520,14 @@ Devuelve JSON estricto con esta estructura:
       success: true,
       modelUsed,
       hallazgos: normalized,
+      seccionesDetectadas: reconstructed.sectionsDetected,
+      bloquesTotales: reconstructed.blocks.length,
       ccrdStages,
       totalExtraidos: normalized.length,
     });
   } catch (error: any) {
     console.error('Error in /api/forensic/extract-hallazgos-ccrd:', error);
-    res.status(500).json({ success: false, error: error.message || 'Error extrayendo hallazgos literales 3.01+.' });
+    res.status(500).json({ success: false, error: error.message || 'Error extrayendo hallazgos literales V2.' });
   }
 });
 
@@ -3135,6 +3289,24 @@ Devuelve JSON estricto:
     res.status(500).json({
       success: false,
       error: error.message || 'Error ejecutando la corrección integral del expediente.',
+    });
+  }
+});
+
+// =========================================================================
+// DOWNLOAD STANDALONE PYTHON/STREAMLIT PACKAGE: BASA_HALLAZGOS_INTELLIGENCE_PRO_V2_FULL.zip
+// =========================================================================
+app.get('/api/forensic/download-basa-v2-zip', async (_req, res) => {
+  try {
+    const zipBuffer = await buildBasaV2FullZipBuffer();
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="BASA_HALLAZGOS_INTELLIGENCE_PRO_V2_FULL.zip"');
+    res.send(zipBuffer);
+  } catch (error: any) {
+    console.error('Error building BASA V2 ZIP:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Error generando el paquete BASA_HALLAZGOS_INTELLIGENCE_PRO_V2_FULL.zip.',
     });
   }
 });
