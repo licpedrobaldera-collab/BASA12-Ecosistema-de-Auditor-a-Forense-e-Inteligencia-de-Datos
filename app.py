@@ -18,6 +18,35 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+from google import genai
+from google.genai.errors import APIError
+
+MODELOS_DISPONIBLES = [
+    "gemini-3.8-flash",
+    "gemini-3.8-flash-lite",
+    "gemini-3.8-pro",
+]
+
+def consultar_gemini_blindado(api_key: str, prompt: str) -> str:
+    client = genai.Client(api_key=api_key.strip())
+    ultimo_error = None
+
+    for modelo in MODELOS_DISPONIBLES:
+        try:
+            response = client.models.generate_content(
+                model=modelo,
+                contents=prompt,
+            )
+            return response.text
+        except APIError as e:
+            ultimo_error = e
+            # Si el modelo no existe (404) o llegó al límite de cuota (429), pasa al siguiente
+            if e.code in (404, 429):
+                continue
+            raise
+
+    raise RuntimeError(f"Ningún modelo respondió correctamente. Último error: {ultimo_error}")
+    
 @st.cache_resource
 def init_db():
     engine = create_engine("sqlite:///basa12_auditoria.db")
