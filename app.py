@@ -18,17 +18,17 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-from google import genai
 from google.genai.errors import APIError
 
 MODELOS_DISPONIBLES = [
     "gemini-3.8-flash",
+    "gemini-4-hydrogen",
+    "gemini-3.1-flash-lite",
     "gemini-3.8-flash-lite",
     "gemini-3.8-pro",
 ]
 
-def consultar_gemini_blindado(api_key: str, prompt: str) -> str:
-    client = genai.Client(api_key=api_key.strip())
+def consultar_gemini_con_cliente(client, prompt: str) -> str:
     ultimo_error = None
 
     for modelo in MODELOS_DISPONIBLES:
@@ -37,15 +37,25 @@ def consultar_gemini_blindado(api_key: str, prompt: str) -> str:
                 model=modelo,
                 contents=prompt,
             )
-            return response.text
+            return response.text or ""
         except APIError as e:
             ultimo_error = e
-            # Si el modelo no existe (404) o llegó al límite de cuota (429), pasa al siguiente
-            if e.code in (404, 429):
+            err_txt = str(e).upper()
+            if getattr(e, "code", None) in (404, 429, 503) or "NOT_FOUND" in err_txt or "404" in err_txt or "429" in err_txt:
+                continue
+            raise
+        except Exception as e:
+            ultimo_error = e
+            err_txt = str(e).upper()
+            if "NOT_FOUND" in err_txt or "404" in err_txt or "429" in err_txt or "503" in err_txt:
                 continue
             raise
 
     raise RuntimeError(f"Ningún modelo respondió correctamente. Último error: {ultimo_error}")
+
+def consultar_gemini_blindado(api_key: str, prompt: str) -> str:
+    client = genai.Client(api_key=api_key.strip())
+    return consultar_gemini_con_cliente(client, prompt)
     
 @st.cache_resource
 def init_db():
@@ -180,11 +190,7 @@ with tab2:
             with st.spinner("Analizando evidencia forense..."):
                 try:
                     prompt = f"{instruccion}\n\nDocumento ({st.session_state.archivo_actual}):\n{st.session_state.texto_extraido[:25000]}"
-                    respuesta = client.models.generate_content(
-                        model="gemini-2.5-flash",
-                        contents=prompt
-                    )
-                    st.session_state.resultado_ia = respuesta.text
+                    st.session_state.resultado_ia = consultar_gemini_con_cliente(client, prompt)
                 except Exception as e:
                     st.error(f"Error al consultar la API de Gemini: {e}")
 
