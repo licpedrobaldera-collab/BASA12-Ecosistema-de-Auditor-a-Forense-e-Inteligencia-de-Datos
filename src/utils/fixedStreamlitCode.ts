@@ -91,37 +91,30 @@ class EcosistemaForenseSupremo:
         Formato: Entrega código Python funcional, libre de alucinaciones, encerrado en bloque markdown.
         """
 
-    def ejecutar_consenso_ia(self, prompt: str, api_gemini: str, api_openai: str, barra=None) -> str:
+    def ejecutar_consenso_ia(self, prompt: str, api_gemini: str, barra=None) -> str:
         # Etapa 1: Motor Gemini
         if barra: barra.progress(25, text="Conectando con Google GenAI v1.0+ (Gemini)...")
         client_gemini = genai.Client(api_key=api_gemini)
-        
-        try:
-            if barra: barra.progress(50, text="Razonando con Gemini 2.5 Flash / Flash...")
-            resp_gemini = client_gemini.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=prompt
-            )
-            raw_gemini = resp_gemini.text
-        except Exception as e:
-            raise RuntimeError(f"Fallo en motor Gemini: {e}")
 
-        # Etapa 2: Refinamiento cruzado (OpenAI o consenso directo)
-        if api_openai and api_openai.startswith("sk-"):
-            if barra: barra.progress(75, text="Refinando y blindando código con GPT-4o...")
+        raw_gemini = ""
+        last_err = None
+        for model_name in ["gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.1-flash-lite"]:
             try:
-                cliente_openai = OpenAI(api_key=api_openai)
-                resp_openai = cliente_openai.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[{"role": "user", "content": f"Audita y limpia este código. Devuelve solo python funcional:\\n{raw_gemini}"}],
-                    temperature=0.1
+                if barra: barra.progress(50, text=f"Razonando con {model_name}...")
+                resp_gemini = client_gemini.models.generate_content(
+                    model=model_name,
+                    contents=prompt
                 )
-                resultado = resp_openai.choices[0].message.content
-            except Exception as e_oa:
-                st.warning(f"Aviso: Validación secundaria con OpenAI falló ({e_oa}), entregando código de Gemini.")
-                resultado = raw_gemini
-        else:
-            resultado = raw_gemini
+                raw_gemini = resp_gemini.text or ""
+                break
+            except Exception as e:
+                last_err = e
+                continue
+
+        if not raw_gemini and last_err:
+            raise RuntimeError(f"Fallo en motor Gemini: {last_err}")
+
+        resultado = raw_gemini
 
         if barra: barra.progress(100, text="Consenso forense completado.")
         return resultado
@@ -160,31 +153,22 @@ class EcosistemaForenseSupremo:
 st.set_page_config(page_title="Ecosistema Forense Supremo", layout="wide", page_icon="🔬")
 st.title("🔬 Ecosistema de Auditoría Forense e Inteligencia de Datos")
 
-# Configuración en la barra lateral
-st.sidebar.header("🔑 Configuración del Sistema API")
-usuario_activo = st.sidebar.selectbox("Seleccionar Usuario", ["admin", "user1"])
+# Lectura automática de clave desde variables de entorno o st.secrets (Settings > Secrets)
+def obtener_clave_gemini():
+    clave = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not clave:
+        try:
+            clave = str(st.secrets.get("GEMINI_API_KEY", "")).strip()
+        except Exception:
+            clave = ""
+    return clave
 
-# Lectura segura del JSON
-try:
-    with open(USUARIOS_JSON, "r", encoding="utf-8") as f:
-        config_db = json.load(f)
-except Exception:
-    config_db = {"admin": {"gemini_key": "", "openai_key": ""}, "user1": {"gemini_key": "", "openai_key": ""}}
-
-gemini_val = config_db.get(usuario_activo, {}).get("gemini_key", "")
-openai_val = config_db.get(usuario_activo, {}).get("openai_key", "")
-
-gemini_key_input = st.sidebar.text_input("Clave API de Gemini", value=gemini_val, type="password")
-openai_key_input = st.sidebar.text_input("Clave API de OpenAI", value=openai_val, type="password")
-
-if st.sidebar.button("💾 Guardar Credenciales"):
-    if usuario_activo not in config_db:
-        config_db[usuario_activo] = {}
-    config_db[usuario_activo]["gemini_key"] = gemini_key_input
-    config_db[usuario_activo]["openai_key"] = openai_key_input
-    with open(USUARIOS_JSON, "w", encoding="utf-8") as f:
-        json.dump(config_db, f, indent=4)
-    st.sidebar.success("✅ Credenciales guardadas correctamente.")
+st.sidebar.header("⚙️ Estado del Motor IA")
+gemini_key_auto = obtener_clave_gemini()
+if gemini_key_auto:
+    st.sidebar.success("✅ API Gemini conectada automáticamente.")
+else:
+    st.sidebar.warning("⚠️ Configura GEMINI_API_KEY en Settings > Secrets.")
 
 # =====================================================================
 # 4. GESTIÓN Y PROCESAMIENTO DE EVIDENCIAS (SECCIÓN RESTAURADA)
@@ -213,15 +197,15 @@ if archivo_adjunto:
 
 # Botón de ejecución
 if st.button("🚀 Ejecutar Análisis Multimodelo IA", type="primary", use_container_width=True):
-    if not gemini_key_input:
-        st.error("❌ Por favor configure su clave de Gemini en la barra lateral antes de continuar.")
+    if not gemini_key_auto:
+        st.error("❌ Falta GEMINI_API_KEY en el entorno o en Settings > Secrets.")
     else:
         barra = st.progress(0, text="Iniciando motor pericial...")
         try:
             motor = EcosistemaForenseSupremo(nombre_caso)
             prompt = motor.construir_prompt_supremo(requerimiento_txt, origen_input)
             
-            codigo_final = motor.ejecutar_consenso_ia(prompt, gemini_key_input, openai_key_input, barra)
+            codigo_final = motor.ejecutar_consenso_ia(prompt, gemini_key_auto, barra)
             
             st.success("✅ Análisis forense completado exitosamente.")
             

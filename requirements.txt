@@ -1,9 +1,12 @@
 streamlit
-google-genai
 pandas
 numpy
-sqlalchemy
-openpyxl
+requests
 python-docx
 pypdf
+xlsxwriter
+openpyxl
+scikit-learn
+sqlalchemy
+google-genai
 plotly

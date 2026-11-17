@@ -23,6 +23,10 @@ import {
   Download,
   ChevronDown,
   ChevronUp,
+  Flame,
+  Filter,
+  LayoutGrid,
+  X,
 } from 'lucide-react';
 import {
   AuditedEntity,
@@ -185,6 +189,9 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
   const [downloadingZip, setDownloadingZip] = useState(false);
   const [expandedTranscriptions, setExpandedTranscriptions] = useState<Record<string, boolean>>({});
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [severityFilter, setSeverityFilter] = useState<'ALL' | 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'OPTIMAL'>('ALL');
+  const [heatmapSortBySeverity, setHeatmapSortBySeverity] = useState(true);
+  const [highlightedHallazgoId, setHighlightedHallazgoId] = useState<string | null>(null);
 
   // Quick CGR/NOBACI Situational Evaluator State
   const [quickSituation, setQuickSituation] = useState('');
@@ -240,6 +247,69 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
       blindajeStatus: status,
     };
   }, [hallazgos]);
+
+  const getSeverityBand = (scoreRaw: number): 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'OPTIMAL' => {
+    const score = Number(scoreRaw) || 0;
+    if (score < 5.0) return 'CRITICAL';
+    if (score < 6.5) return 'HIGH';
+    if (score < 8.0) return 'MEDIUM';
+    return 'OPTIMAL';
+  };
+
+  const getHeatmapStyle = (scoreRaw: number) => {
+    const score = Number(scoreRaw) || 0;
+    if (score < 3.0) {
+      return {
+        band: 'CRITICAL' as const,
+        label: 'CRÍTICO EXTREMO',
+        cellClass: 'bg-red-950/85 border-red-500/80 text-red-100 hover:border-red-400 shadow-red-950/50 shadow-md',
+        badgeClass: 'bg-red-600 text-white',
+      };
+    }
+    if (score < 5.0) {
+      return {
+        band: 'CRITICAL' as const,
+        label: 'CRÍTICO',
+        cellClass: 'bg-red-900/45 border-red-500/60 text-red-200 hover:border-red-400',
+        badgeClass: 'bg-red-500/30 text-red-200 border border-red-500/50',
+      };
+    }
+    if (score < 6.5) {
+      return {
+        band: 'HIGH' as const,
+        label: 'ALTO',
+        cellClass: 'bg-orange-950/55 border-orange-500/50 text-orange-100 hover:border-orange-400',
+        badgeClass: 'bg-orange-500/25 text-orange-200 border border-orange-500/45',
+      };
+    }
+    if (score < 8.0) {
+      return {
+        band: 'MEDIUM' as const,
+        label: 'MODERADO',
+        cellClass: 'bg-amber-950/45 border-amber-500/45 text-amber-100 hover:border-amber-400',
+        badgeClass: 'bg-amber-500/20 text-amber-200 border border-amber-500/40',
+      };
+    }
+    return {
+      band: 'OPTIMAL' as const,
+      label: 'ÓPTIMO',
+      cellClass: 'bg-emerald-950/45 border-emerald-500/45 text-emerald-100 hover:border-emerald-400',
+      badgeClass: 'bg-emerald-500/20 text-emerald-200 border border-emerald-500/40',
+    };
+  };
+
+  const { heatmapCounts, heatmapItems } = useMemo(() => {
+    const counts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, OPTIMAL: 0 };
+    hallazgos.forEach((h) => {
+      counts[getSeverityBand(h.puntaje0a10)] += 1;
+    });
+    const sorted = [...hallazgos].sort((a, b) =>
+      heatmapSortBySeverity
+        ? (Number(a.puntaje0a10) || 0) - (Number(b.puntaje0a10) || 0)
+        : 0
+    );
+    return { heatmapCounts: counts, heatmapItems: sorted };
+  }, [hallazgos, heatmapSortBySeverity]);
 
   // Inline draft for adding punctual articles & norms per finding ("Lo que debe ser")
   const [citationDraft, setCitationDraft] = useState<
@@ -825,8 +895,13 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
     URL.revokeObjectURL(url);
   };
 
-  const displayedRows =
+  const baseTabRows =
     activeTab === 'correctos' ? correctos : activeTab === 'observados' ? conObservacion : hallazgos;
+
+  const displayedRows = useMemo(() => {
+    if (severityFilter === 'ALL') return baseTabRows;
+    return baseTabRows.filter((h) => getSeverityBand(h.puntaje0a10) === severityFilter);
+  }, [baseTabRows, severityFilter]);
 
   return (
     <section className="bg-slate-900 border border-slate-800 rounded-2xl p-5 sm:p-6 shadow-xl space-y-6">
@@ -1077,6 +1152,154 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
             </div>
           </div>
         </div>
+      </div>
+
+      {/* 2C. Mapa de Calor (Heatmap) de Severidad Forense por Puntaje 0–10 */}
+      <div className="bg-slate-950/90 border border-slate-800 rounded-xl p-4 space-y-3">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
+          <div>
+            <div className="text-xs font-bold text-slate-100 flex items-center gap-2 flex-wrap">
+              <LayoutGrid className="w-4 h-4 text-rose-400" />
+              Mapa de Calor (Heatmap) de Severidad Forense — Clasificación por Puntaje (0–10)
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-300">
+                Priorización de Revisión
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-400 mt-0.5">
+              Clasifica automáticamente cada hallazgo según su solidez (0.0–4.9 Crítico, 5.0–6.4 Alto, 6.5–7.9 Moderado, 8.0–10.0 Óptimo). Haz clic en una celda para ir al hallazgo o filtra por severidad crítica.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={() => setHeatmapSortBySeverity((prev) => !prev)}
+              className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border cursor-pointer transition-colors ${
+                heatmapSortBySeverity
+                  ? 'bg-sky-600/20 text-sky-200 border-sky-500/40'
+                  : 'bg-slate-900 text-slate-400 border-slate-700 hover:text-white'
+              }`}
+            >
+              {heatmapSortBySeverity ? 'Orden: Más Críticos Primero (0→10)' : 'Orden: Secuencia del Informe'}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setSeverityFilter((prev) => (prev === 'CRITICAL' ? 'ALL' : 'CRITICAL'));
+                if (activeTab === 'duplicidades' || activeTab === 'recomendacion_ccrd') {
+                  setActiveTab('matriz');
+                }
+              }}
+              className={`px-3 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1.5 border cursor-pointer transition-all ${
+                severityFilter === 'CRITICAL'
+                  ? 'bg-red-600 text-white border-red-400 shadow-lg shadow-red-950/50'
+                  : 'bg-red-950/40 hover:bg-red-900/50 text-red-200 border-red-500/50'
+              }`}
+            >
+              <Flame className="w-3.5 h-3.5" />
+              {severityFilter === 'CRITICAL'
+                ? `Mostrando Críticos (${heatmapCounts.CRITICAL})`
+                : `Priorizar Severidad Crítica (${heatmapCounts.CRITICAL})`}
+            </button>
+          </div>
+        </div>
+
+        {/* Severity Filter & Scale Legend Strip */}
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-800/80 text-[11px]">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-slate-400 flex items-center gap-1 mr-1">
+              <Filter className="w-3 h-3" /> Filtrar matriz:
+            </span>
+            {[
+              { id: 'ALL', label: `Todos (${hallazgos.length})`, cls: 'border-slate-700 text-slate-300 bg-slate-900', activeCls: 'bg-sky-600 text-white border-sky-400' },
+              { id: 'CRITICAL', label: `Crítico < 5.0 (${heatmapCounts.CRITICAL})`, cls: 'border-red-500/40 text-red-300 bg-red-950/30', activeCls: 'bg-red-600 text-white border-red-400' },
+              { id: 'HIGH', label: `Alto 5.0–6.4 (${heatmapCounts.HIGH})`, cls: 'border-orange-500/40 text-orange-300 bg-orange-950/30', activeCls: 'bg-orange-600 text-white border-orange-400' },
+              { id: 'MEDIUM', label: `Moderado 6.5–7.9 (${heatmapCounts.MEDIUM})`, cls: 'border-amber-500/40 text-amber-300 bg-amber-950/30', activeCls: 'bg-amber-600 text-white border-amber-400' },
+              { id: 'OPTIMAL', label: `Óptimo 8.0–10 (${heatmapCounts.OPTIMAL})`, cls: 'border-emerald-500/40 text-emerald-300 bg-emerald-950/30', activeCls: 'bg-emerald-600 text-white border-emerald-400' },
+            ].map((btn) => (
+              <button
+                key={btn.id}
+                type="button"
+                onClick={() => {
+                  setSeverityFilter(btn.id as typeof severityFilter);
+                  if (activeTab === 'duplicidades' || activeTab === 'recomendacion_ccrd') {
+                    setActiveTab('matriz');
+                  }
+                }}
+                className={`px-2.5 py-1 rounded-md border font-semibold cursor-pointer transition-colors ${
+                  severityFilter === btn.id ? btn.activeCls : `${btn.cls} hover:opacity-90`
+                }`}
+              >
+                {btn.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-mono">
+            <span>0.0</span>
+            <span className="w-3.5 h-2.5 rounded-sm bg-red-700 border border-red-400/60" title="0.0–2.9 Crítico Extremo" />
+            <span className="w-3.5 h-2.5 rounded-sm bg-red-500/70 border border-red-400/50" title="3.0–4.9 Crítico" />
+            <span className="w-3.5 h-2.5 rounded-sm bg-orange-500/70 border border-orange-400/50" title="5.0–6.4 Alto" />
+            <span className="w-3.5 h-2.5 rounded-sm bg-amber-500/70 border border-amber-400/50" title="6.5–7.9 Moderado" />
+            <span className="w-3.5 h-2.5 rounded-sm bg-emerald-500/70 border border-emerald-400/50" title="8.0–10.0 Óptimo" />
+            <span>10.0</span>
+          </div>
+        </div>
+
+        {/* Heatmap Cells Grid */}
+        {heatmapItems.length === 0 ? (
+          <div className="text-center py-4 text-[11px] text-slate-500 border border-dashed border-slate-800 rounded-lg">
+            Extraiga o registre hallazgos para visualizar el mapa de calor de severidad 0–10.
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2 max-h-72 overflow-y-auto pr-1">
+            {heatmapItems.map((h) => {
+              const score = Number(h.puntaje0a10) || 0;
+              const style = getHeatmapStyle(score);
+              const isDimmed = severityFilter !== 'ALL' && style.band !== severityFilter;
+              return (
+                <button
+                  key={`hm-${h.id}`}
+                  type="button"
+                  onClick={() => {
+                    if (activeTab !== 'matriz') setActiveTab('matriz');
+                    if (severityFilter !== 'ALL' && style.band !== severityFilter) {
+                      setSeverityFilter('ALL');
+                    }
+                    setHighlightedHallazgoId(h.id);
+                    setTimeout(() => {
+                      document.getElementById(`hallazgo-card-${h.id}`)?.scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'center',
+                      });
+                    }, 80);
+                  }}
+                  title={`${h.idHallazgo} — ${h.titulo} | Puntaje: ${score.toFixed(1)}/10 (${style.label})`}
+                  className={`text-left rounded-lg border p-2.5 transition-all cursor-pointer ${style.cellClass} ${
+                    isDimmed ? 'opacity-30' : 'opacity-100'
+                  } ${highlightedHallazgoId === h.id ? 'ring-2 ring-sky-400' : ''}`}
+                >
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="font-mono font-bold text-[11px] truncate">{h.idHallazgo}</span>
+                    <span className="font-mono font-extrabold text-xs">{score.toFixed(1)}</span>
+                  </div>
+                  <div className="mt-1 text-[10.5px] font-medium leading-tight line-clamp-2 opacity-90">
+                    {h.titulo || 'Sin título'}
+                  </div>
+                  <div className="mt-1.5 flex items-center justify-between gap-1">
+                    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${style.badgeClass}`}>
+                      {style.label}
+                    </span>
+                    {h.esDuplicado && (
+                      <span className="text-[9px] font-bold text-amber-300">DUP</span>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* 3. Evaluador Situacional Senior CGR / NOBACI / Ley 41-08 / MAP / DGCP */}
@@ -1359,18 +1582,60 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
         </div>
       ) : displayedRows.length === 0 ? (
         <div className="bg-slate-950/60 border border-dashed border-slate-800 rounded-xl p-8 text-center text-xs text-slate-400 space-y-2">
-          <p>
-            No hay acápites en esta vista. Cargue su documento en el Paso 2 o Informe Preliminar en el Paso 4 y presione{' '}
-            <strong className="text-sky-300">"Extraer Hallazgos Literales (3.01+)"</strong> o añada uno manualmente.
-          </p>
+          {severityFilter !== 'ALL' && baseTabRows.length > 0 ? (
+            <div className="space-y-2">
+              <p>
+                No hay hallazgos con severidad{' '}
+                <strong className="text-red-300">{severityFilter}</strong> en esta pestaña.
+              </p>
+              <button
+                type="button"
+                onClick={() => setSeverityFilter('ALL')}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 rounded-lg text-xs font-semibold cursor-pointer inline-flex items-center gap-1"
+              >
+                <X className="w-3.5 h-3.5" />
+                Mostrar todos los hallazgos ({baseTabRows.length})
+              </button>
+            </div>
+          ) : (
+            <p>
+              No hay acápites en esta vista. Cargue su documento en el Paso 2 o Informe Preliminar en el Paso 4 y presione{' '}
+              <strong className="text-sky-300">&quot;Extraer Hallazgos Literales (3.01+)&quot;</strong> o añada uno manualmente.
+            </p>
+          )}
         </div>
       ) : (
         <div className="space-y-4">
-          {displayedRows.map((h) => (
+          {severityFilter !== 'ALL' && (
+            <div className="flex items-center justify-between gap-2 bg-red-950/30 border border-red-500/40 rounded-lg px-3.5 py-2 text-xs text-red-200">
+              <div className="flex items-center gap-2">
+                <Flame className="w-4 h-4 text-red-400 shrink-0" />
+                <span>
+                  Filtro Heatmap activo: mostrando <strong>{displayedRows.length}</strong> de{' '}
+                  <strong>{baseTabRows.length}</strong> hallazgo(s) ({severityFilter === 'CRITICAL' ? 'Severidad Crítica: puntaje 0.0–4.9' : severityFilter}).
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSeverityFilter('ALL')}
+                className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 rounded text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+              >
+                <X className="w-3 h-3" />
+                Limpiar filtro
+              </button>
+            </div>
+          )}
+
+          {displayedRows.map((h) => {
+            const hmStyle = getHeatmapStyle(h.puntaje0a10);
+            return (
             <div
+              id={`hallazgo-card-${h.id}`}
               key={h.id}
-              className={`bg-slate-950/90 border rounded-xl p-4 space-y-3 text-xs ${
-                h.esDuplicado
+              className={`bg-slate-950/90 border rounded-xl p-4 space-y-3 text-xs transition-all ${
+                highlightedHallazgoId === h.id
+                  ? 'border-sky-400 ring-2 ring-sky-500/40'
+                  : h.esDuplicado
                   ? 'border-amber-500/60'
                   : h.estado === 'Correcto / Cumple'
                   ? 'border-emerald-700/50'
@@ -1414,6 +1679,10 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
                     <option value="Correcto / Cumple">Correcto / Cumple</option>
                     <option value="Con Observación / Mejora">Con Observación / Mejora</option>
                   </select>
+
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${hmStyle.badgeClass}`}>
+                    {hmStyle.label}
+                  </span>
 
                   <div className="flex items-center gap-1 bg-slate-900 border border-slate-700 rounded px-2 py-1">
                     <span className="text-[10px] text-slate-400">Nota:</span>
@@ -1878,7 +2147,8 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
                 </div>
               </div>
             </div>
-          ))}
+          );
+          })}
         </div>
       )}
     </section>
