@@ -1,0 +1,1688 @@
+import os
+import re
+import io
+import json
+import math
+import sqlite3
+import hashlib
+from collections import Counter
+from datetime import datetime
+from typing import List, Tuple, Dict, Any
+
+import numpy as np
+import pandas as pd
+import requests
+import streamlit as st
+
+import docx
+from docx.shared import Pt, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from pypdf import PdfReader
+
+# SDK oficial Google GenAI (Gemini)
+try:
+    from google import genai
+    from google.genai.errors import APIError
+    HAS_GENAI = True
+except ImportError:
+    HAS_GENAI = False
+
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+    HAS_SKLEARN = True
+except ImportError:
+    HAS_SKLEARN = False
+
+# ==============================================================================
+# CONFIGURACIÓN GLOBAL DE PRODUCCIÓN (SIN DATOS DE PRUEBA NI MOCKS)
+# ==============================================================================
+APP_TITLE = "BASA13 HALLAZGOS INTELIGENTE PRO"
+APP_VERSION = "v8.0.0-FINAL-PROD (Autonomía Inteligente + Pre-Check Motores + CRUD Completo)"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "basa13_hallazgos_prod.db")
+
+MODELOS_DISPONIBLES = [
+    "gemini-3.8-flash",
+    "gemini-3.8-flash-lite",
+    "gemini-3.8-pro",
+]
+
+MATRIX_COLUMNS = [
+    "ID_BD",
+    "Verificado",
+    "Sección",
+    "Código",
+    "Hallazgo actual",
+    "Transcripción íntegra",
+    "Condición",
+    "Criterio",
+    "Causa",
+    "Efecto",
+    "Riesgo",
+    "Evidencia",
+    "Cuantificación",
+    "Responsabilidad",
+    "Recomendación actual",
+    "Deficiencias",
+    "Duplicidad",
+    "Hallazgo relacionado",
+    "Clasificación",
+    "Justificación de conservar/eliminar/consolidar",
+    "Puntaje 0–10",
+    "Nivel",
+    "Qué falta para 10/10",
+    "Versión mejorada 10/10",
+    "Referencias normativas",
+    "Ubicación"
+]
+
+# ==============================================================================
+# GESTOR DE BASE DE DATOS SQLITE (LIMPIA, TRANSACCIONAL Y CON FUSIÓN DE BDs)
+# ==============================================================================
+def get_db_connection(db_file: str = DB_PATH) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_file, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON;")
+    return conn
+
+
+def init_db() -> None:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS configuracion (
+            clave TEXT PRIMARY KEY,
+            valor TEXT NOT NULL,
+            actualizado_en TEXT NOT NULL
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS auditorias (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre_archivo TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            fecha_carga TEXT NOT NULL,
+            motor_usado TEXT NOT NULL,
+            total_paginas_lineas TEXT,
+            total_hallazgos INTEGER DEFAULT 0,
+            promedio_puntaje REAL DEFAULT 0.0,
+            estado TEXT DEFAULT 'EN REVISIÓN',
+            observaciones_generales TEXT DEFAULT ''
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS hallazgos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            auditoria_id INTEGER NOT NULL,
+            verificado INTEGER DEFAULT 0,
+            seccion TEXT,
+            codigo TEXT NOT NULL,
+            hallazgo_actual TEXT,
+            transcripcion_integra TEXT,
+            condicion TEXT,
+            criterio TEXT,
+            causa TEXT,
+            efecto TEXT,
+            riesgo TEXT,
+            evidencia TEXT,
+            cuantificacion TEXT,
+            responsabilidad TEXT,
+            recomendacion_actual TEXT,
+            deficiencias TEXT,
+            duplicidad TEXT,
+            hallazgo_relacionado TEXT,
+            clasificacion TEXT,
+            justificacion TEXT,
+            puntaje REAL DEFAULT 0.0,
+            nivel TEXT,
+            que_falta TEXT,
+            version_mejorada TEXT,
+            referencias_normativas TEXT,
+            ubicacion TEXT,
+            ultima_modificacion TEXT,
+            FOREIGN KEY (auditoria_id) REFERENCES auditorias(id) ON DELETE CASCADE
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS bitacora_operaciones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            operacion TEXT NOT NULL,
+            detalle TEXT,
+            fecha TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def registrar_bitacora(operacion: str, detalle: str) -> None:
+    conn = get_db_connection()
+    conn.execute(
+        "INSERT INTO bitacora_operaciones (operacion, detalle, fecha) VALUES (?, ?, ?)",
+        (operacion, detalle, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_get_config(clave: str, default: str = "") -> str:
+    conn = get_db_connection()
+    row = conn.execute("SELECT valor FROM configuracion WHERE clave = ?", (clave,)).fetchone()
+    conn.close()
+    return row["valor"] if row else default
+
+
+def db_set_config(clave: str, valor: str) -> None:
+    conn = get_db_connection()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute("""
+        INSERT INTO configuracion (clave, valor, actualizado_en)
+        VALUES (?, ?, ?)
+        ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor, actualizado_en = excluded.actualizado_en
+    """, (clave, valor.strip(), now_str))
+    conn.commit()
+    conn.close()
+
+
+def db_delete_config(clave: str) -> None:
+    conn = get_db_connection()
+    conn.execute("DELETE FROM configuracion WHERE clave = ?", (clave,))
+    conn.commit()
+    conn.close()
+
+
+def reset_clean_database(keep_api_key: bool = True) -> Dict[str, int]:
+    """Purga todos los registros de análisis anteriores y compacta la BD (VACUUM) dejándola en 0."""
+    saved_key = db_get_config("gemini_api_key", "") if keep_api_key else ""
+    conteo = {"auditorias": 0, "hallazgos": 0, "bitacora_operaciones": 0}
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    for t in conteo.keys():
+        cur.execute(f"SELECT COUNT(*) FROM {t}")
+        conteo[t] = cur.fetchone()[0]
+        cur.execute(f"DELETE FROM {t}")
+    if not keep_api_key:
+        cur.execute("DELETE FROM configuracion")
+    cur.execute("DELETE FROM sqlite_sequence")
+    conn.commit()
+    conn.close()
+
+    conn_vac = sqlite3.connect(DB_PATH)
+    conn_vac.execute("VACUUM")
+    conn_vac.close()
+
+    if saved_key:
+        db_set_config("gemini_api_key", saved_key)
+
+    registrar_bitacora("LIMPIEZA_TOTAL_BD", f"BD purgada y compactada para producción: {json.dumps(conteo)}")
+    return conteo
+
+
+def fusionar_base_datos_secundaria(ruta_db_sec: str) -> Dict[str, Any]:
+    """Fusiona auditorías, hallazgos y configuraciones desde otra BD SQLite hacia la BD principal."""
+    resumen = {
+        "auditorias_fusionadas": 0,
+        "hallazgos_fusionados": 0,
+        "configuraciones_incorporadas": 0
+    }
+    conn_main = get_db_connection(DB_PATH)
+    cur_main = conn_main.cursor()
+
+    conn_sec = sqlite3.connect(ruta_db_sec)
+    conn_sec.row_factory = sqlite3.Row
+    cur_sec = conn_sec.cursor()
+
+    tablas_sec = {r["name"] for r in cur_sec.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+
+    for t_cfg in ["configuracion", "parametros_auditoria", "parametros"]:
+        if t_cfg in tablas_sec:
+            for r in cur_sec.execute(f"SELECT * FROM {t_cfg}").fetchall():
+                d = dict(r)
+                k = d.get("clave") or d.get("parametro")
+                v = d.get("valor")
+                if k and v is not None:
+                    cur_main.execute("""
+                        INSERT OR IGNORE INTO configuracion (clave, valor, actualizado_en)
+                        VALUES (?, ?, ?)
+                    """, (str(k), str(v), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                    if cur_main.rowcount > 0:
+                        resumen["configuraciones_incorporadas"] += 1
+
+    if "auditorias" in tablas_sec and "hallazgos" in tablas_sec:
+        for aud in cur_sec.execute("SELECT * FROM auditorias").fetchall():
+            a = dict(aud)
+            cur_main.execute("""
+                INSERT INTO auditorias (
+                    nombre_archivo, sha256, fecha_carga, motor_usado,
+                    total_paginas_lineas, total_hallazgos, promedio_puntaje, estado, observaciones_generales
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                f"[FUSIÓN] {a.get('nombre_archivo', 'Sin nombre')}",
+                a.get("sha256", "FUSIONADO"),
+                a.get("fecha_carga", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                a.get("motor_usado", "Fusión BD"),
+                a.get("total_paginas_lineas", ""),
+                a.get("total_hallazgos", 0),
+                a.get("promedio_puntaje", 0.0),
+                a.get("estado", "EN REVISIÓN"),
+                a.get("observaciones_generales", "")
+            ))
+            nuevo_aud_id = cur_main.lastrowid
+            resumen["auditorias_fusionadas"] += 1
+
+            for hall in cur_sec.execute("SELECT * FROM hallazgos WHERE auditoria_id = ?", (a["id"],)).fetchall():
+                h = dict(hall)
+                cur_main.execute("""
+                    INSERT INTO hallazgos (
+                        auditoria_id, verificado, seccion, codigo, hallazgo_actual,
+                        transcripcion_integra, condicion, criterio, causa, efecto,
+                        riesgo, evidencia, cuantificacion, responsabilidad,
+                        recomendacion_actual, deficiencias, duplicidad,
+                        hallazgo_relacionado, clasificacion, justificacion,
+                        puntaje, nivel, que_falta, version_mejorada,
+                        referencias_normativas, ubicacion, ultima_modificacion
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    nuevo_aud_id,
+                    h.get("verificado", 0),
+                    h.get("seccion", ""),
+                    h.get("codigo", ""),
+                    h.get("hallazgo_actual", ""),
+                    h.get("transcripcion_integra", ""),
+                    h.get("condicion", ""),
+                    h.get("criterio", ""),
+                    h.get("causa", ""),
+                    h.get("efecto", ""),
+                    h.get("riesgo", ""),
+                    h.get("evidencia", ""),
+                    h.get("cuantificacion", ""),
+                    h.get("responsabilidad", ""),
+                    h.get("recomendacion_actual", ""),
+                    h.get("deficiencias", ""),
+                    h.get("duplicidad", ""),
+                    h.get("hallazgo_relacionado", ""),
+                    h.get("clasificacion", "MEJORAR"),
+                    h.get("justificacion", ""),
+                    h.get("puntaje", 0.0),
+                    h.get("nivel", ""),
+                    h.get("que_falta", ""),
+                    h.get("version_mejorada", ""),
+                    h.get("referencias_normativas", ""),
+                    h.get("ubicacion", ""),
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                ))
+                resumen["hallazgos_fusionados"] += 1
+
+    conn_sec.close()
+    conn_main.commit()
+    conn_main.close()
+    registrar_bitacora("FUSION_BD_SECUNDARIA", json.dumps(resumen))
+    return resumen
+
+
+def db_save_audit(
+    nombre_archivo: str,
+    sha256: str,
+    motor_usado: str,
+    meta_doc: str,
+    df: pd.DataFrame
+) -> int:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    promedio = float(df["Puntaje 0–10"].mean()) if not df.empty else 0.0
+
+    cur.execute("""
+        INSERT INTO auditorias (
+            nombre_archivo, sha256, fecha_carga, motor_usado,
+            total_paginas_lineas, total_hallazgos, promedio_puntaje, estado, observaciones_generales
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (nombre_archivo, sha256, now_str, motor_usado, meta_doc, len(df), round(promedio, 2), "EN REVISIÓN", ""))
+    auditoria_id = cur.lastrowid
+
+    for _, row in df.iterrows():
+        cur.execute("""
+            INSERT INTO hallazgos (
+                auditoria_id, verificado, seccion, codigo, hallazgo_actual,
+                transcripcion_integra, condicion, criterio, causa, efecto,
+                riesgo, evidencia, cuantificacion, responsabilidad,
+                recomendacion_actual, deficiencias, duplicidad,
+                hallazgo_relacionado, clasificacion, justificacion,
+                puntaje, nivel, que_falta, version_mejorada,
+                referencias_normativas, ubicacion, ultima_modificacion
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            auditoria_id,
+            1 if row.get("Verificado", False) else 0,
+            str(row.get("Sección", "")),
+            str(row.get("Código", "")),
+            str(row.get("Hallazgo actual", "")),
+            str(row.get("Transcripción íntegra", "")),
+            str(row.get("Condición", "")),
+            str(row.get("Criterio", "")),
+            str(row.get("Causa", "")),
+            str(row.get("Efecto", "")),
+            str(row.get("Riesgo", "")),
+            str(row.get("Evidencia", "")),
+            str(row.get("Cuantificación", "")),
+            str(row.get("Responsabilidad", "")),
+            str(row.get("Recomendación actual", "")),
+            str(row.get("Deficiencias", "")),
+            str(row.get("Duplicidad", "")),
+            str(row.get("Hallazgo relacionado", "")),
+            str(row.get("Clasificación", "MEJORAR")),
+            str(row.get("Justificación de conservar/eliminar/consolidar", "")),
+            float(row.get("Puntaje 0–10", 0.0)),
+            str(row.get("Nivel", "")),
+            str(row.get("Qué falta para 10/10", "")),
+            str(row.get("Versión mejorada 10/10", "")),
+            str(row.get("Referencias normativas", "")),
+            str(row.get("Ubicación", "")),
+            now_str
+        ))
+
+    conn.commit()
+    conn.close()
+    registrar_bitacora("NUEVA_AUDITORIA", f"ID #{auditoria_id} - {nombre_archivo} ({len(df)} hallazgos)")
+    return auditoria_id
+
+
+def db_list_audits() -> pd.DataFrame:
+    conn = get_db_connection()
+    df = pd.read_sql_query("""
+        SELECT
+            a.id AS ID,
+            a.nombre_archivo AS Archivo,
+            a.fecha_carga AS Fecha,
+            a.motor_usado AS Motor,
+            (SELECT COUNT(*) FROM hallazgos h WHERE h.auditoria_id = a.id) AS Hallazgos,
+            COALESCE(ROUND((SELECT AVG(puntaje) FROM hallazgos h WHERE h.auditoria_id = a.id), 2), 0.0) AS Promedio,
+            (SELECT COUNT(*) FROM hallazgos h WHERE h.auditoria_id = a.id AND h.verificado = 1) AS Verificados,
+            a.estado AS Estado,
+            COALESCE(a.observaciones_generales, '') AS Observaciones,
+            SUBSTR(a.sha256, 1, 16) || '...' AS SHA256_Corto,
+            a.sha256 AS SHA256_Full
+        FROM auditorias a
+        ORDER BY a.id DESC
+    """, conn)
+    conn.close()
+    return df
+
+
+def db_update_audit_metadata(auditoria_id: int, nuevo_nombre: str, nuevo_estado: str, observaciones: str) -> None:
+    conn = get_db_connection()
+    conn.execute("""
+        UPDATE auditorias
+        SET nombre_archivo = ?, estado = ?, observaciones_generales = ?
+        WHERE id = ?
+    """, (nuevo_nombre.strip(), nuevo_estado, observaciones, auditoria_id))
+    conn.commit()
+    conn.close()
+
+
+def db_load_hallazgos(auditoria_id: int) -> pd.DataFrame:
+    conn = get_db_connection()
+    rows = conn.execute("SELECT * FROM hallazgos WHERE auditoria_id = ? ORDER BY id ASC", (auditoria_id,)).fetchall()
+    conn.close()
+    if not rows:
+        return pd.DataFrame(columns=MATRIX_COLUMNS)
+
+    data = []
+    for r in rows:
+        data.append({
+            "ID_BD": r["id"],
+            "Verificado": bool(r["verificado"]),
+            "Sección": r["seccion"],
+            "Código": r["codigo"],
+            "Hallazgo actual": r["hallazgo_actual"],
+            "Transcripción íntegra": r["transcripcion_integra"],
+            "Condición": r["condicion"],
+            "Criterio": r["criterio"],
+            "Causa": r["causa"],
+            "Efecto": r["efecto"],
+            "Riesgo": r["riesgo"],
+            "Evidencia": r["evidencia"],
+            "Cuantificación": r["cuantificacion"],
+            "Responsabilidad": r["responsabilidad"],
+            "Recomendación actual": r["recomendacion_actual"],
+            "Deficiencias": r["deficiencias"],
+            "Duplicidad": r["duplicidad"],
+            "Hallazgo relacionado": r["hallazgo_relacionado"],
+            "Clasificación": r["clasificacion"],
+            "Justificación de conservar/eliminar/consolidar": r["justificacion"],
+            "Puntaje 0–10": float(r["puntaje"]),
+            "Nivel": r["nivel"],
+            "Qué falta para 10/10": r["que_falta"],
+            "Versión mejorada 10/10": r["version_mejorada"],
+            "Referencias normativas": r["referencias_normativas"],
+            "Ubicación": r["ubicacion"],
+        })
+    return pd.DataFrame(data)
+
+
+def db_update_hallazgos_bulk(auditoria_id: int, edited_df: pd.DataFrame, nuevo_estado: str = None) -> None:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    existing_ids = {
+        row[0] for row in cur.execute("SELECT id FROM hallazgos WHERE auditoria_id = ?", (auditoria_id,)).fetchall()
+    }
+    kept_ids = set()
+
+    for _, row in edited_df.iterrows():
+        row_id = row.get("ID_BD")
+        puntaje = float(row.get("Puntaje 0–10", 0.0))
+        nivel = calcular_nivel(puntaje)
+
+        if pd.notna(row_id) and int(row_id) in existing_ids:
+            rid = int(row_id)
+            kept_ids.add(rid)
+            cur.execute("""
+                UPDATE hallazgos SET
+                    verificado = ?, seccion = ?, codigo = ?, hallazgo_actual = ?,
+                    transcripcion_integra = ?, condicion = ?, criterio = ?, causa = ?,
+                    efecto = ?, riesgo = ?, evidencia = ?, cuantificacion = ?,
+                    responsabilidad = ?, recomendacion_actual = ?, deficiencias = ?,
+                    duplicidad = ?, hallazgo_relacionado = ?, clasificacion = ?,
+                    justificacion = ?, puntaje = ?, nivel = ?, que_falta = ?,
+                    version_mejorada = ?, referencias_normativas = ?, ubicacion = ?,
+                    ultima_modificacion = ?
+                WHERE id = ? AND auditoria_id = ?
+            """, (
+                1 if row.get("Verificado", False) else 0,
+                str(row.get("Sección", "")),
+                str(row.get("Código", "")),
+                str(row.get("Hallazgo actual", "")),
+                str(row.get("Transcripción íntegra", "")),
+                str(row.get("Condición", "")),
+                str(row.get("Criterio", "")),
+                str(row.get("Causa", "")),
+                str(row.get("Efecto", "")),
+                str(row.get("Riesgo", "")),
+                str(row.get("Evidencia", "")),
+                str(row.get("Cuantificación", "")),
+                str(row.get("Responsabilidad", "")),
+                str(row.get("Recomendación actual", "")),
+                str(row.get("Deficiencias", "")),
+                str(row.get("Duplicidad", "")),
+                str(row.get("Hallazgo relacionado", "")),
+                str(row.get("Clasificación", "MEJORAR")),
+                str(row.get("Justificación de conservar/eliminar/consolidar", "")),
+                puntaje,
+                nivel,
+                str(row.get("Qué falta para 10/10", "")),
+                str(row.get("Versión mejorada 10/10", "")),
+                str(row.get("Referencias normativas", "")),
+                str(row.get("Ubicación", "")),
+                now_str,
+                rid,
+                auditoria_id
+            ))
+        else:
+            cur.execute("""
+                INSERT INTO hallazgos (
+                    auditoria_id, verificado, seccion, codigo, hallazgo_actual,
+                    transcripcion_integra, condicion, criterio, causa, efecto,
+                    riesgo, evidencia, cuantificacion, responsabilidad,
+                    recomendacion_actual, deficiencias, duplicidad,
+                    hallazgo_relacionado, clasificacion, justificacion,
+                    puntaje, nivel, que_falta, version_mejorada,
+                    referencias_normativas, ubicacion, ultima_modificacion
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                auditoria_id,
+                1 if row.get("Verificado", False) else 0,
+                str(row.get("Sección", "")),
+                str(row.get("Código", "")),
+                str(row.get("Hallazgo actual", "")),
+                str(row.get("Transcripción íntegra", "")),
+                str(row.get("Condición", "")),
+                str(row.get("Criterio", "")),
+                str(row.get("Causa", "")),
+                str(row.get("Efecto", "")),
+                str(row.get("Riesgo", "")),
+                str(row.get("Evidencia", "")),
+                str(row.get("Cuantificación", "")),
+                str(row.get("Responsabilidad", "")),
+                str(row.get("Recomendación actual", "")),
+                str(row.get("Deficiencias", "")),
+                str(row.get("Duplicidad", "")),
+                str(row.get("Hallazgo relacionado", "")),
+                str(row.get("Clasificación", "MEJORAR")),
+                str(row.get("Justificación de conservar/eliminar/consolidar", "")),
+                puntaje,
+                nivel,
+                str(row.get("Qué falta para 10/10", "")),
+                str(row.get("Versión mejorada 10/10", "")),
+                str(row.get("Referencias normativas", "")),
+                str(row.get("Ubicación", "")),
+                now_str
+            ))
+
+    to_delete = existing_ids - kept_ids
+    for del_id in to_delete:
+        cur.execute("DELETE FROM hallazgos WHERE id = ? AND auditoria_id = ?", (del_id, auditoria_id))
+
+    avg_val = float(edited_df["Puntaje 0–10"].mean()) if not edited_df.empty else 0.0
+    if nuevo_estado:
+        cur.execute("""
+            UPDATE auditorias
+            SET total_hallazgos = ?, promedio_puntaje = ?, estado = ?
+            WHERE id = ?
+        """, (len(edited_df), round(avg_val, 2), nuevo_estado, auditoria_id))
+    else:
+        cur.execute("""
+            UPDATE auditorias
+            SET total_hallazgos = ?, promedio_puntaje = ?
+            WHERE id = ?
+        """, (len(edited_df), round(avg_val, 2), auditoria_id))
+
+    conn.commit()
+    conn.close()
+
+
+def db_delete_audit(auditoria_id: int) -> None:
+    conn = get_db_connection()
+    conn.execute("DELETE FROM auditorias WHERE id = ?", (auditoria_id,))
+    conn.commit()
+    conn.close()
+
+
+# ==============================================================================
+# VERIFICACIÓN DE SALUD DE MOTORES (OLLAMA LOCAL Y GEMINI BLINDADO)
+# ==============================================================================
+def check_ollama_available(ollama_url: str, timeout: float = 1.2) -> Tuple[bool, str]:
+    """Comprueba rápidamente en 1 segundo si Ollama está corriendo localmente sin colgar el flujo."""
+    try:
+        resp = requests.get(f"{ollama_url.rstrip('/')}/api/tags", timeout=timeout)
+        if resp.status_code == 200:
+            models = [m.get("name", "") for m in resp.json().get("models", [])]
+            return True, (", ".join(models) if models else "Activo (sin modelos descargados)")
+        return False, f"HTTP {resp.status_code}"
+    except Exception:
+        return False, "Servicio Ollama detenido en este equipo (puerto 11434 cerrado)"
+
+
+def consultar_gemini_blindado(api_key: str, prompt: str) -> str:
+    if not HAS_GENAI:
+        raise RuntimeError("La librería 'google-genai' no está instalada. Ejecute: pip install google-genai")
+
+    client = genai.Client(api_key=api_key.strip())
+    ultimo_error = None
+
+    for modelo in MODELOS_DISPONIBLES:
+        try:
+            response = client.models.generate_content(
+                model=modelo,
+                contents=prompt,
+            )
+            return response.text
+        except APIError as e:
+            ultimo_error = e
+            if getattr(e, "code", None) in (404, 429):
+                continue
+            raise
+        except Exception as e:
+            ultimo_error = e
+            if "404" in str(e) or "429" in str(e):
+                continue
+            raise
+
+    raise RuntimeError(f"Ningún modelo respondió correctamente. Último error: {ultimo_error}")
+
+
+def evaluate_with_gemini_api(
+    finding: Dict[str, Any],
+    attrs: Dict[str, str],
+    api_key: str
+) -> Dict[str, Any]:
+    prompt = f"""Eres un Auditor Forense y Supervisor de Control Gubernamental en República Dominicana (Ley 18-24, Ley 10-07, Ley 41-08, Ley 340-06 y NOBACI).
+REGLA ESTRICTA DE INTEGRIDAD: Analiza ÚNICAMENTE el contenido real transcrito del informe. NO inventes montos, fechas, cargos ni leyes que no aparezcan en el texto. Si un elemento falta en el texto original, indícalo expresamente.
+
+CÓDIGO: {finding['codigo']}
+SECCIÓN: {finding['seccion']}
+TÍTULO: {finding['titulo']}
+TRANSCRIPCIÓN ÍNTEGRA TEXTUAL DEL INFORME:
+\"\"\"
+{finding['transcripcion_integra'][:14000]}
+\"\"\"
+
+Responde ÚNICAMENTE con un objeto JSON válido (sin bloques markdown ```json) con estas claves exactas:
+{{
+  "condicion": "resumen técnico preciso de lo ocurrido según el texto",
+  "criterio": "normativa exacta citada en el informe y depurada",
+  "causa": "causa raíz identificada en el texto o 'No explicitado en el texto del informe'",
+  "efecto": "consecuencia material o administrativa identificada en el texto",
+  "riesgo": "riesgo institucional o patrimonial derivado",
+  "evidencia": "soportes, anexos y comunicaciones citadas en el texto",
+  "cuantificacion": "montos, muestras o porcentajes reales del texto",
+  "responsabilidad": "cargos o áreas responsables citadas",
+  "recomendacion": "recomendación presente en el texto o 'No explicitado en el texto del informe'",
+  "deficiencias": "fallas técnicas, artículos redundantes o vacíos detectados",
+  "clasificacion": "CONSERVAR | MEJORAR | CONSOLIDAR | ELIMINAR",
+  "justificacion": "párrafo técnico justificando la decisión y qué criterios conservar o depurar",
+  "puntaje": 8.0,
+  "que_falta": "lista concreta de elementos faltantes para alcanzar nivel 10/10",
+  "version_mejorada": "propuesta de redacción nivel 10/10 basada estrictamente en los hechos y criterios reales del informe"
+}}"""
+
+    raw_text = consultar_gemini_blindado(api_key, prompt).strip()
+    raw_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text, flags=re.IGNORECASE | re.MULTILINE).strip()
+    ai_data = json.loads(raw_text)
+
+    merged = {**attrs}
+    for k, v in ai_data.items():
+        if v is not None and str(v).strip() != "":
+            merged[k] = v
+    return merged
+
+
+# ==============================================================================
+# FASE 1, 2 Y 3: EXTRACTOR DE 100% DE HALLAZGOS (TEXTO + ESQUEMA XML + TABLAS)
+# ==============================================================================
+def compute_sha256(file_bytes: bytes) -> str:
+    return hashlib.sha256(file_bytes).hexdigest()
+
+
+def normalize_spaces(text: str) -> str:
+    return text.replace("\xa0", " ").replace("\t", " ").strip()
+
+
+def iter_docx_blocks(doc: docx.Document):
+    parent_elm = doc.element.body
+    for child in parent_elm.iterchildren():
+        if child.tag.endswith("p"):
+            yield docx.text.paragraph.Paragraph(child, doc)
+        elif child.tag.endswith("tbl"):
+            yield docx.table.Table(child, doc)
+
+
+def get_heading_level(paragraph: docx.text.paragraph.Paragraph) -> int:
+    style_name = (paragraph.style.name or "").strip().lower()
+    m_style = re.search(r"(?:heading|t[íi]tulo)\s*([1-4])", style_name)
+    if m_style:
+        return int(m_style.group(1))
+
+    pPr = paragraph._p.pPr
+    if pPr is not None:
+        if pPr.outlineLvl is not None and pPr.outlineLvl.val is not None:
+            lvl = int(pPr.outlineLvl.val)
+            if 0 <= lvl <= 3:
+                return lvl + 1
+        if pPr.numPr is not None and pPr.numPr.ilvl is not None:
+            numId = str(pPr.numPr.numId.val) if pPr.numPr.numId is not None else "0"
+            if numId != "0":
+                ilvl = int(pPr.numPr.ilvl.val)
+                if 0 <= ilvl <= 3:
+                    return ilvl + 1
+    return 0
+
+
+def extract_structured_lines(file_name: str, file_bytes: bytes) -> Tuple[List[Dict[str, str]], str]:
+    ext = os.path.splitext(file_name)[1].lower()
+    records: List[Dict[str, str]] = []
+    meta_info = ""
+
+    if ext == ".docx":
+        doc = docx.Document(io.BytesIO(file_bytes))
+        idx = 0
+        tbl_count = 0
+        sec_counter = 0
+        find_counter = 0
+        in_cap3 = False
+
+        for block in iter_docx_blocks(doc):
+            if isinstance(block, docx.text.paragraph.Paragraph):
+                raw_txt = block.text
+                if not raw_txt or not raw_txt.strip():
+                    continue
+                idx += 1
+                clean_txt = normalize_spaces(raw_txt)
+                h_level = get_heading_level(block)
+
+                m_explicit = re.match(r"^(3(?:\.\d+){1,2})\b", clean_txt)
+                if m_explicit:
+                    in_cap3 = True
+                    parts = m_explicit.group(1).split(".")
+                    if len(parts) == 2 and len(parts[1]) == 1:
+                        sec_counter = int(parts[1])
+                        find_counter = 0
+                    elif len(parts) == 3:
+                        sec_counter = int(parts[1])
+                        find_counter = int(parts[2])
+                elif h_level == 1:
+                    if re.search(r"\b(?:HALLAZGOS|RESULTADOS|OBSERVACIONES)\b", clean_txt, re.IGNORECASE) or clean_txt.startswith("3"):
+                        in_cap3 = True
+                        sec_counter = 0
+                        find_counter = 0
+                    elif in_cap3 and re.match(r"^(?:4|IV|CONCLUSIONES|RECOMENDACIONES|ANEXOS)", clean_txt, re.IGNORECASE):
+                        in_cap3 = False
+                elif in_cap3 and h_level == 2:
+                    sec_counter += 1
+                    find_counter = 0
+                    clean_txt = f"3.{sec_counter} {clean_txt}"
+                elif in_cap3 and h_level == 3:
+                    find_counter += 1
+                    sec_use = sec_counter if sec_counter > 0 else 1
+                    clean_txt = f"3.{sec_use}.{find_counter:02d} {clean_txt}"
+
+                records.append({
+                    "loc": f"Párrafo {idx}",
+                    "type": "text",
+                    "content": clean_txt,
+                    "h_level": str(h_level)
+                })
+
+            elif isinstance(block, docx.table.Table):
+                tbl_count += 1
+                rows_txt = []
+                for row in block.rows:
+                    cells = [normalize_spaces(c.text).replace("\n", " ") for c in row.cells]
+                    rows_txt.append(" | ".join(cells))
+                tbl_str = "\n".join(rows_txt).strip()
+                if tbl_str:
+                    idx += 1
+                    records.append({
+                        "loc": f"Párrafo/Tabla {idx} (Tabla #{tbl_count})",
+                        "type": "table",
+                        "content": f"[TABLA ADJUNTA]\n{tbl_str}",
+                        "h_level": "0"
+                    })
+        meta_info = f"DOCX: {idx} bloques extraídos ({tbl_count} tablas)"
+
+    elif ext == ".pdf":
+        reader = PdfReader(io.BytesIO(file_bytes))
+        total_pages = len(reader.pages)
+        line_num = 0
+        for p_idx, page in enumerate(reader.pages, start=1):
+            page_txt = page.extract_text() or ""
+            for raw_line in page_txt.splitlines():
+                clean = normalize_spaces(raw_line)
+                if clean:
+                    line_num += 1
+                    records.append({"loc": f"Pág. {p_idx} / Línea {line_num}", "type": "text", "content": clean, "h_level": "0"})
+        meta_info = f"PDF: {total_pages} páginas / {line_num} líneas"
+
+    elif ext in [".xlsx", ".xls"]:
+        xls = pd.ExcelFile(io.BytesIO(file_bytes))
+        row_counter = 0
+        for sheet in xls.sheet_names:
+            df_s = xls.parse(sheet).fillna("")
+            for r_idx, row in df_s.iterrows():
+                row_counter += 1
+                joined = " | ".join([f"{col}: {val}" for col, val in row.items() if str(val).strip()])
+                if joined:
+                    records.append({"loc": f"Hoja '{sheet}' Fila {r_idx + 2}", "type": "table", "content": joined, "h_level": "0"})
+        meta_info = f"Excel: {len(xls.sheet_names)} hojas / {row_counter} filas"
+
+    else:
+        text = file_bytes.decode("utf-8", errors="replace")
+        for i, line in enumerate(text.splitlines(), start=1):
+            clean = normalize_spaces(line)
+            if clean:
+                records.append({"loc": f"Línea {i}", "type": "text", "content": clean, "h_level": "0"})
+        meta_info = f"Texto/CSV/MD: {len(records)} líneas"
+
+    return records, meta_info
+
+
+RE_SECTION_HEADER = re.compile(r"^(3\.[1-9])\s*[-–:.]?\s*([A-ZÁÉÍÓÚÑa-záéíóúñ].{3,220})$")
+RE_FINDING_HEADER = re.compile(r"^(3\.(?:0[1-9]|[1-9]\d|[1-9]\.(?:0[1-9]|[1-9]\d?)))\s*[-–:.]?\s*(.+)$")
+RE_CHAPTER_END = re.compile(r"^(?:4\.|IV\.|CONCLUSIONES\s+GENERALES|RECOMENDACIONES\s+GENERALES|ANEXOS\b)", re.IGNORECASE)
+
+
+def is_valid_finding_code(code: str) -> bool:
+    parts = code.split(".")
+    if parts[0] != "3":
+        return False
+    if len(parts) == 2:
+        return len(parts[1]) >= 2 and int(parts[1]) >= 1
+    if len(parts) == 3:
+        return int(parts[1]) >= 1 and int(parts[2]) >= 1
+    return False
+
+
+def segment_findings_from_records(records: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    findings: List[Dict[str, Any]] = []
+    current_section = "3. Hallazgos de Auditoría / Investigación Especial"
+    active_finding: Dict[str, Any] = None
+    in_chapter_3 = False
+
+    for rec in records:
+        txt = rec["content"].strip()
+        loc = rec["loc"]
+
+        if re.search(r"\.{3,}\s*\d{1,3}$", txt):
+            continue
+
+        if in_chapter_3 and RE_CHAPTER_END.match(txt) and len(txt) < 120:
+            if active_finding:
+                findings.append(active_finding)
+                active_finding = None
+            break
+
+        sec_match = RE_SECTION_HEADER.match(txt)
+        if sec_match and not is_valid_finding_code(sec_match.group(1)):
+            if active_finding:
+                findings.append(active_finding)
+                active_finding = None
+            current_section = f"{sec_match.group(1)} {sec_match.group(2).strip()}"
+            in_chapter_3 = True
+            continue
+
+        f_match = RE_FINDING_HEADER.match(txt)
+        if f_match and is_valid_finding_code(f_match.group(1)):
+            code = f_match.group(1).strip()
+            title = f_match.group(2).strip()
+
+            if len(title) < 6 or (len(title.split()) > 28 and title.endswith(".")):
+                if active_finding is not None:
+                    active_finding["blocks"].append(txt)
+                    active_finding["end_loc"] = loc
+                continue
+
+            if active_finding:
+                findings.append(active_finding)
+
+            in_chapter_3 = True
+            active_finding = {
+                "seccion": current_section,
+                "codigo": code,
+                "titulo": title,
+                "start_loc": loc,
+                "end_loc": loc,
+                "blocks": [txt]
+            }
+            continue
+
+        if active_finding is not None:
+            active_finding["blocks"].append(txt)
+            active_finding["end_loc"] = loc
+
+    if active_finding:
+        findings.append(active_finding)
+
+    by_code: Dict[str, Dict[str, Any]] = {}
+    order_codes: List[str] = []
+    for item in findings:
+        full_text = "\n\n".join(item["blocks"])
+        item["transcripcion_integra"] = full_text
+        item["ubicacion"] = f"{item['start_loc']} → {item['end_loc']}"
+        c = item["codigo"]
+        if c not in by_code:
+            by_code[c] = item
+            order_codes.append(c)
+        else:
+            if len(full_text) > len(by_code[c]["transcripcion_integra"]):
+                by_code[c] = item
+
+    return [by_code[c] for c in order_codes]
+
+
+# ==============================================================================
+# FASE 4: ANÁLISIS FORENSE / OLLAMA / GEMINI BLINDADO
+# ==============================================================================
+NORM_PATTERNS = [
+    r"Ley\s+(?:núm\.|n\.°|No\.|N°|#)?\s*\d+[-–]\d+[^,.;\n]*",
+    r"Decreto\s+(?:núm\.|n\.°|No\.|N°|#)?\s*\d+[-–]\d+[^,.;\n]*",
+    r"Resolución\s+(?:núm\.|n\.°|No\.|N°|#)?\s*[\w\d/-]+[^,.;\n]*",
+    r"NOBACI[^,.;\n]*",
+    r"ADC-\d+-\d+(?:\.\d+)?",
+    r"Artículo(?:s)?\s+\d+[^,.;\n]*",
+    r"Constitución\s+de\s+la\s+República[^,.;\n]*"
+]
+
+
+def extract_normative_references(text: str) -> str:
+    found = []
+    for pat in NORM_PATTERNS:
+        for m in re.findall(pat, text, flags=re.IGNORECASE):
+            clean = re.sub(r"\s+", " ", m).strip(" ,.;:")
+            if len(clean) > 4 and clean not in found:
+                found.append(clean)
+    return "; ".join(found[:18]) if found else "No explicitado en el texto del informe"
+
+
+def compute_similarity_matrix(corpus: List[str]) -> np.ndarray:
+    n = len(corpus)
+    mat = np.zeros((n, n))
+    if n <= 1:
+        return mat
+
+    if HAS_SKLEARN:
+        try:
+            vec = TfidfVectorizer(ngram_range=(1, 2), min_df=1)
+            tfidf = vec.fit_transform(corpus)
+            return cosine_similarity(tfidf)
+        except Exception:
+            pass
+
+    counters = [Counter(re.findall(r"\w+", doc.lower())) for doc in corpus]
+    for i in range(n):
+        for j in range(i + 1, n):
+            c1, c2 = counters[i], counters[j]
+            common = set(c1.keys()) & set(c2.keys())
+            num = sum(c1[k] * c2[k] for k in common)
+            den = math.sqrt(sum(v * v for v in c1.values())) * math.sqrt(sum(v * v for v in c2.values()))
+            sim = (num / den) if den > 0 else 0.0
+            mat[i, j] = sim
+            mat[j, i] = sim
+    return mat
+
+
+def split_forensic_attributes(full_text: str, title: str) -> Dict[str, str]:
+    paragraphs = [p.strip() for p in full_text.split("\n\n") if p.strip()]
+    body_paras = paragraphs[1:] if len(paragraphs) > 1 else paragraphs
+
+    condicion_list, criterio_list, causa_list, efecto_list = [], [], [], []
+    evidencia_list, recom_list = [], []
+
+    for p in body_paras:
+        p_low = p.lower()
+        if any(k in p_low for k in ["ley ", "decreto ", "nobaci", "adc-", "artículo", "resolución", "norma ", "reglamento"]):
+            criterio_list.append(p)
+        elif any(k in p_low for k in ["recomendación", "se recomienda", "debe instruir", "deberá proceder"]) and ("recomienda" in p_low or "recomendación" in p_low):
+            recom_list.append(p)
+        elif any(k in p_low for k in ["debido a", "originado por", "la causa", "obedece a", "producto de la falta"]):
+            causa_list.append(p)
+        elif any(k in p_low for k in ["lo que ocasionó", "generando", "el efecto", "riesgo de", "vulnerabilidad", "afectando"]):
+            efecto_list.append(p)
+        else:
+            condicion_list.append(p)
+
+        if any(k in p_low for k in ["anexo", "comunicación", "oficio", "certificación", "expediente", "contrato", "factura", "tabla adjunta", "muestra", "ver detalle"]):
+            evidencia_list.append(p)
+
+    condicion = "\n".join(condicion_list) if condicion_list else title
+    criterio = "\n".join(criterio_list) if criterio_list else "No explicitado en el texto del informe"
+    causa = "\n".join(causa_list) if causa_list else "No explicitado en el texto del informe"
+    efecto_raw = "\n".join(efecto_list) if efecto_list else "No explicitado en el texto del informe"
+    evidencia = "\n".join(evidencia_list) if evidencia_list else "No explicitado en el texto del informe"
+
+    nums = re.findall(
+        r"(?:RD\$|\$|US\$)\s*[\d,]+(?:\.\d+)?|\b\d+(?:\.\d+)?\s*%|\(\d+\)\s*(?:expedientes|contratos|pagos|servidores|procesos|casos)",
+        full_text,
+        flags=re.IGNORECASE
+    )
+    cuantificacion = ", ".join(dict.fromkeys(nums[:15])) if nums else "No explicitado en el texto del informe"
+
+    cargos = re.findall(
+        r"(?:Director(?:a)?(?:\s+de\s+[\w\s]+)?|Encargado(?:a)?(?:\s+de\s+[\w\s]+)?|Titular|Ministro(?:a)?|Administrador(?:a)?|Consultor(?:a)?\s+Jurídico)",
+        full_text,
+        flags=re.IGNORECASE
+    )
+    responsabilidad = ", ".join(dict.fromkeys([re.sub(r"\s+", " ", c).strip() for c in cargos[:8]])) if cargos else "No explicitado en el texto del informe"
+    recomendacion = "\n".join(recom_list) if recom_list else "No explicitado en el texto del informe"
+
+    return {
+        "condicion": condicion,
+        "criterio": criterio,
+        "causa": causa,
+        "efecto": efecto_raw,
+        "riesgo": efecto_raw if "riesgo" in efecto_raw.lower() else "No explicitado en el texto del informe",
+        "evidencia": evidencia,
+        "cuantificacion": cuantificacion,
+        "responsabilidad": responsabilidad,
+        "recomendacion": recomendacion
+    }
+
+
+def calcular_nivel(puntaje: float) -> str:
+    if puntaje >= 9.0:
+        return "EXCELENTE (10/10)"
+    if puntaje >= 7.5:
+        return "SÓLIDO (CONSERVAR)"
+    if puntaje >= 5.0:
+        return "MEJORABLE (REFORZAR)"
+    return "CRÍTICO (DEPURAR)"
+
+
+def evaluate_with_ollama(
+    finding: Dict[str, Any],
+    attrs: Dict[str, str],
+    ollama_url: str,
+    model_name: str
+) -> Dict[str, Any]:
+    prompt = f"""Eres un Auditor Forense y Supervisor de Control Gubernamental en República Dominicana.
+REGLA ESTRICTA: Analiza ÚNICAMENTE el contenido real transcrito del informe. NO inventes montos, fechas, cargos ni normas que no aparezcan en el texto.
+
+CÓDIGO: {finding['codigo']}
+SECCIÓN: {finding['seccion']}
+TÍTULO: {finding['titulo']}
+TRANSCRIPCIÓN ÍNTEGRA TEXTUAL:
+{finding['transcripcion_integra'][:12000]}
+
+Responde SOLO en JSON válido con claves: condicion, criterio, causa, efecto, riesgo, evidencia, cuantificacion, responsabilidad, recomendacion, deficiencias, clasificacion, justificacion, puntaje, que_falta, version_mejorada."""
+
+    resp = requests.post(
+        f"{ollama_url.rstrip('/')}/api/generate",
+        json={"model": model_name, "prompt": prompt, "stream": False, "format": "json"},
+        timeout=90
+    )
+    resp.raise_for_status()
+    ai_data = json.loads(resp.json().get("response", "{}"))
+    merged = {**attrs}
+    for k, v in ai_data.items():
+        if v is not None and str(v).strip() != "":
+            merged[k] = v
+    return merged
+
+
+def evaluate_deterministic_forensic(
+    finding: Dict[str, Any],
+    attrs: Dict[str, str],
+    refs: str,
+    sim_pct: float,
+    related_code: str
+) -> Dict[str, Any]:
+    full_txt = finding["transcripcion_integra"]
+    word_count = len(full_txt.split())
+
+    score = 0.0
+    deficiencias = []
+    que_falta = []
+
+    if len(attrs["condicion"]) > 80 and word_count >= 35:
+        score += 2.5
+    elif len(attrs["condicion"]) > 25:
+        score += 1.5
+        deficiencias.append("Condición con desarrollo breve en el informe.")
+        que_falta.append("Ampliar detalle fáctico de la condición.")
+    else:
+        deficiencias.append("Condición ausente o limitada al título.")
+        que_falta.append("Incorporar hechos verificables de la condición.")
+
+    if not attrs["criterio"].startswith("No explicitado") and not refs.startswith("No explicitado"):
+        score += 2.5
+        if len(attrs["criterio"]) > 1800:
+            score -= 0.5
+            deficiencias.append("Transcripción extensa de artículos/numerales que pueden depurarse.")
+            que_falta.append("Depurar numerales sin relación directa con la condición.")
+    else:
+        deficiencias.append("Criterio normativo no explicitado en el bloque.")
+        que_falta.append("Vincular base legal/normativa aplicable.")
+
+    if not attrs["evidencia"].startswith("No explicitado"):
+        score += 1.5
+    else:
+        deficiencias.append("Sin referencia explícita a anexos, oficios o soportes.")
+        que_falta.append("Citar anexos, comunicaciones de descargos y evidencias.")
+
+    if not attrs["cuantificacion"].startswith("No explicitado"):
+        score += 1.0
+    else:
+        deficiencias.append("Sin cuantificación monetaria o muestral en el texto.")
+        que_falta.append("Cuantificar universo, muestra o impacto económico.")
+
+    if not attrs["causa"].startswith("No explicitado"):
+        score += 0.75
+    else:
+        deficiencias.append("Causa raíz no explicitada por separado.")
+        que_falta.append("Redactar párrafo expreso de causa raíz.")
+
+    if not attrs["efecto"].startswith("No explicitado"):
+        score += 0.75
+    else:
+        deficiencias.append("Efecto/riesgo no explicitado por separado.")
+        que_falta.append("Explicitar efecto material y riesgo institucional.")
+
+    if not attrs["responsabilidad"].startswith("No explicitado"):
+        score += 0.5
+    else:
+        deficiencias.append("Cargo responsable no delimitado explícitamente.")
+        que_falta.append("Delimitar el cargo titular responsable.")
+
+    if not attrs["recomendacion"].startswith("No explicitado"):
+        score += 0.5
+    else:
+        deficiencias.append("Sin recomendación específica vinculada al bloque.")
+        que_falta.append("Incluir recomendación correctiva dirigida al titular.")
+
+    score = round(max(0.0, min(10.0, score)), 2)
+
+    if word_count < 20 and score < 3.0:
+        clasificacion = "ELIMINAR"
+        justificacion = f"Bloque {finding['codigo']} sin desarrollo sustantivo ({word_count} palabras); eliminar como hallazgo independiente."
+    elif sim_pct >= 72.0 and related_code:
+        clasificacion = "CONSOLIDAR"
+        justificacion = f"Similitud real del {sim_pct:.1f}% con {related_code}; consolidar conservando normativa ({refs})."
+    elif score >= 7.5:
+        clasificacion = "CONSERVAR"
+        justificacion = f"Hallazgo sustentado ({score}/10) con evidencia y normativa real del informe ({refs})."
+    else:
+        clasificacion = "MEJORAR"
+        justificacion = f"Hallazgo válido que requiere completar elementos faltantes ({', '.join(deficiencias[:3])}) sobre la base de ({refs})."
+
+    version_10 = (
+        f"[{finding['codigo']} — {finding['titulo']}]\n"
+        f"• CONDICIÓN (Factual del informe): {attrs['condicion']}\n"
+        f"• CRITERIO NORMATIVO APLICABLE: {attrs['criterio']}\n"
+        f"• EVIDENCIA Y CUANTIFICACIÓN DOCUMENTADA: {attrs['evidencia']} | Datos cuantitativos: {attrs['cuantificacion']}\n"
+        f"• BRECHAS A COMPLETAR POR EL AUDITOR (Sin datos inventados): {'; '.join(que_falta) if que_falta else 'Completo.'}"
+    )
+
+    result = {**attrs}
+    result.update({
+        "deficiencias": "; ".join(deficiencias) if deficiencias else "Ninguna deficiencia crítica.",
+        "clasificacion": clasificacion,
+        "justificacion": justificacion,
+        "puntaje": score,
+        "que_falta": "; ".join(que_falta) if que_falta else "Cumple con los estándares técnicos (10/10).",
+        "version_mejorada": version_10
+    })
+    return result
+
+
+def analyze_findings_pipeline(
+    findings: List[Dict[str, Any]],
+    motor_seleccionado: str,
+    gemini_api_key: str = "",
+    ollama_url: str = "http://localhost:11434",
+    ollama_model: str = "llama3.1"
+) -> Tuple[pd.DataFrame, str]:
+    if not findings:
+        return pd.DataFrame(columns=MATRIX_COLUMNS), motor_seleccionado
+
+    motor_efectivo = motor_seleccionado
+    ollama_activo = False
+    gemini_activo = False
+
+    # Pre-verificación única antes del bucle (evita repetir errores WinError 10061 en cada hallazgo)
+    if "Ollama" in motor_seleccionado:
+        ok_ol, msg_ol = check_ollama_available(ollama_url)
+        if ok_ol:
+            ollama_activo = True
+        else:
+            if gemini_api_key.strip():
+                gemini_activo = True
+                motor_efectivo = "Google Gemini API (Auto-Respaldo por Ollama apagado)"
+                st.info(f"ℹ️ {msg_ol}. Conmutando automáticamente a **Google Gemini API**.")
+            else:
+                motor_efectivo = "Motor Documental Forense (Respaldo Autónomo Local)"
+                st.info(f"ℹ️ {msg_ol}. Ejecutando análisis con **Motor Documental Forense Autónomo Local** sin interrupciones.")
+
+    elif "Gemini" in motor_seleccionado:
+        if gemini_api_key.strip():
+            gemini_activo = True
+        else:
+            motor_efectivo = "Motor Documental Forense (Respaldo Autónomo Local)"
+            st.info("ℹ️ No hay API Key de Gemini registrada. Ejecutando con **Motor Documental Forense Autónomo Local**.")
+
+    corpus = [f["transcripcion_integra"] for f in findings]
+    sim_matrix = compute_similarity_matrix(corpus)
+
+    rows = []
+    progress = st.progress(0, text="Analizando hallazgos íntegros...")
+
+    for idx, f in enumerate(findings):
+        progress.progress((idx + 1) / len(findings), text=f"Evaluando hallazgo {f['codigo']} ({idx + 1}/{len(findings)})...")
+
+        max_sim = 0.0
+        rel_code = ""
+        if len(findings) > 1:
+            sims = sim_matrix[idx].copy()
+            sims[idx] = -1.0
+            best_j = int(np.argmax(sims))
+            if sims[best_j] > 0:
+                max_sim = round(float(sims[best_j]) * 100, 1)
+                rel_code = findings[best_j]["codigo"] if max_sim >= 45.0 else ""
+
+        dup_label = f"Sí ({max_sim}%)" if max_sim >= 65.0 else (f"Parcial ({max_sim}%)" if max_sim >= 45.0 else f"No ({max_sim}%)")
+
+        attrs = split_forensic_attributes(f["transcripcion_integra"], f["titulo"])
+        refs = extract_normative_references(f["transcripcion_integra"])
+
+        eval_res = None
+        if gemini_activo:
+            try:
+                eval_res = evaluate_with_gemini_api(f, attrs, gemini_api_key)
+            except Exception as e:
+                st.warning(f"Gemini API no respondió en {f['codigo']} ({e}). Aplicando respaldo autónomo local.")
+                gemini_activo = False
+                motor_efectivo = "Motor Documental Forense (Respaldo Autónomo Local)"
+
+        elif ollama_activo:
+            try:
+                eval_res = evaluate_with_ollama(f, attrs, ollama_url, ollama_model)
+            except Exception as e:
+                st.warning(f"Ollama interrumpido en {f['codigo']} ({e}). Aplicando respaldo autónomo local.")
+                ollama_activo = False
+                motor_efectivo = "Motor Documental Forense (Respaldo Autónomo Local)"
+
+        if eval_res is None:
+            eval_res = evaluate_deterministic_forensic(f, attrs, refs, max_sim, rel_code)
+
+        puntaje_final = round(float(eval_res.get("puntaje", 7.0)), 2)
+
+        rows.append({
+            "ID_BD": None,
+            "Verificado": False,
+            "Sección": f.get("seccion", ""),
+            "Código": f.get("codigo", ""),
+            "Hallazgo actual": f.get("titulo", ""),
+            "Transcripción íntegra": f.get("transcripcion_integra", ""),
+            "Condición": eval_res.get("condicion", attrs["condicion"]),
+            "Criterio": eval_res.get("criterio", attrs["criterio"]),
+            "Causa": eval_res.get("causa", attrs["causa"]),
+            "Efecto": eval_res.get("efecto", attrs["efecto"]),
+            "Riesgo": eval_res.get("riesgo", attrs["riesgo"]),
+            "Evidencia": eval_res.get("evidencia", attrs["evidencia"]),
+            "Cuantificación": eval_res.get("cuantificacion", attrs["cuantificacion"]),
+            "Responsabilidad": eval_res.get("responsabilidad", attrs["responsabilidad"]),
+            "Recomendación actual": eval_res.get("recomendacion", attrs["recomendacion"]),
+            "Deficiencias": eval_res.get("deficiencias", ""),
+            "Duplicidad": dup_label,
+            "Hallazgo relacionado": rel_code,
+            "Clasificación": eval_res.get("clasificacion", "MEJORAR"),
+            "Justificación de conservar/eliminar/consolidar": eval_res.get("justificacion", ""),
+            "Puntaje 0–10": puntaje_final,
+            "Nivel": calcular_nivel(puntaje_final),
+            "Qué falta para 10/10": eval_res.get("que_falta", ""),
+            "Versión mejorada 10/10": eval_res.get("version_mejorada", ""),
+            "Referencias normativas": refs,
+            "Ubicación": f.get("ubicacion", "")
+        })
+
+    progress.empty()
+    return pd.DataFrame(rows), motor_efectivo
+
+
+# ==============================================================================
+# EXPORTADORES PROFESIONALES (EXCEL, WORD EDITABLE Y CSV CON TRAZABILIDAD SHA-256)
+# ==============================================================================
+def export_to_excel_bytes(df: pd.DataFrame, meta: Dict[str, str]) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        export_df = df.drop(columns=["ID_BD"], errors="ignore")
+        export_df.to_excel(writer, sheet_name="Matriz_Hallazgos", index=False, startrow=4)
+        workbook = writer.book
+        ws = writer.sheets["Matriz_Hallazgos"]
+
+        title_fmt = workbook.add_format({"bold": True, "font_size": 14, "font_color": "#0F2942"})
+        meta_fmt = workbook.add_format({"font_size": 10, "font_color": "#333333"})
+        header_fmt = workbook.add_format({"bold": True, "bg_color": "#0F2942", "font_color": "#FFFFFF", "border": 1, "text_wrap": True})
+        cell_fmt = workbook.add_format({"border": 1, "text_wrap": True, "valign": "top"})
+
+        ws.write("A1", f"{APP_TITLE} — MATRIZ ÍNTEGRA DE HALLAZGOS (100% DATOS REALES)", title_fmt)
+        ws.write("A2", f"Archivo: {meta.get('archivo', '')} | SHA-256: {meta.get('sha256', '')}", meta_fmt)
+
+        for col_num, col_name in enumerate(export_df.columns):
+            ws.write(4, col_num, col_name, header_fmt)
+            ws.set_column(col_num, col_num, 38 if col_name == "Transcripción íntegra" else 24)
+
+        for r_idx in range(len(export_df)):
+            for c_idx in range(len(export_df.columns)):
+                val = export_df.iloc[r_idx, c_idx]
+                ws.write(r_idx + 5, c_idx, "" if pd.isna(val) else val, cell_fmt)
+    return output.getvalue()
+
+
+def export_to_word_bytes(df: pd.DataFrame, meta: Dict[str, str]) -> bytes:
+    doc = docx.Document()
+    style = doc.styles["Normal"]
+    style.font.name = "Calibri"
+    style.font.size = Pt(10.5)
+
+    p_title = doc.add_paragraph()
+    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run_t = p_title.add_run(f"{APP_TITLE}\nINFORME EJECUTIVO DE REVISIÓN ÍNTEGRA DE HALLAZGOS")
+    run_t.bold = True
+    run_t.font.size = Pt(15)
+    run_t.font.color.rgb = RGBColor(15, 41, 66)
+
+    doc.add_paragraph(
+        f"Entidad / Archivo Fuente: {meta.get('archivo', '')}\n"
+        f"Trazabilidad SHA-256: {meta.get('sha256', '')}\n"
+        f"Total Hallazgos Extraídos: {len(df)}\n"
+        f"Fecha de Emisión: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    doc.add_heading("Detalle Técnico y Transcripción Íntegra por Hallazgo", level=1)
+
+    for _, r in df.iterrows():
+        doc.add_heading(f"{r['Código']} — {r['Hallazgo actual']}", level=2)
+        doc.add_paragraph(f"Sección: {r['Sección']} | Ubicación: {r['Ubicación']} | Puntaje: {r['Puntaje 0–10']}/10 | Clasificación: {r['Clasificación']}")
+        doc.add_paragraph(f"• Referencias Normativas Reales: {r['Referencias normativas']}")
+        doc.add_paragraph(f"• Duplicidad: {r['Duplicidad']} {('-> Relacionado con ' + str(r['Hallazgo relacionado'])) if r['Hallazgo relacionado'] else ''}")
+        doc.add_paragraph(f"• Justificación Técnica: {r['Justificación de conservar/eliminar/consolidar']}")
+        doc.add_paragraph(f"• Brechas / Qué falta para 10/10: {r['Qué falta para 10/10']}")
+        p_orig = doc.add_paragraph()
+        p_orig.add_run("Transcripción Íntegra Textual del Informe:\n").bold = True
+        p_orig.add_run(str(r["Transcripción íntegra"]))
+
+    out = io.BytesIO()
+    doc.save(out)
+    return out.getvalue()
+
+
+# ==============================================================================
+# INTERFAZ WEB EN PRODUCCIÓN (STREAMLIT) - RENDERIZADO DIRECTO GARANTIZADO
+# ==============================================================================
+def main():
+    st.set_page_config(page_title=APP_TITLE, page_icon="🛡️", layout="wide")
+    init_db()
+
+    st.markdown(f"""
+        <div style="background: linear-gradient(90deg, #0F2942 0%, #1E4D7B 100%); padding: 1.2rem; border-radius: 10px; color: white; margin-bottom: 1rem;">
+            <h1 style="margin:0; font-size:1.6rem;">🛡️ {APP_TITLE}</h1>
+            <p style="margin:0.2rem 0 0 0; opacity:0.9; font-size:0.9rem;">{APP_VERSION}</p>
+        </div>
+    """, unsafe_allow_html=True)
+
+    stored_api_key = db_get_config("gemini_api_key", os.environ.get("GEMINI_API_KEY", ""))
+    ollama_ok, ollama_status_msg = check_ollama_available("http://localhost:11434", timeout=0.6)
+
+    with st.sidebar:
+        st.header("🧠 Autonomía y Motores de IA")
+        motores_opciones = [
+            "Motor Documental Forense (100% Local / Sin Internet)",
+            "Google Gemini API (Multi-Modelo Blindado 3.8)",
+            "IA Local Confidencial (Ollama)"
+        ]
+        default_motor_idx = 1 if stored_api_key else (2 if ollama_ok else 0)
+        modo_motor = st.radio("Seleccione el Motor Activo:", motores_opciones, index=default_motor_idx)
+
+        st.caption(
+            f"Estado en tiempo real:\n"
+            f"• **Gemini API Key:** {'🟢 Registrada' if stored_api_key else '🟡 Sin registrar'}\n"
+            f"• **Ollama Local:** {'🟢 En línea' if ollama_ok else '⚪ Apagado (Respaldo automático activo)'}"
+        )
+
+        st.divider()
+        st.subheader("🔑 Registro de Clave API (Gemini)")
+        api_key_input = st.text_input(
+            "Clave API Google GenAI:",
+            value=stored_api_key,
+            type="password",
+            placeholder="AIzaSy...",
+            help="Se almacena localmente en SQLite para uso autónomo."
+        )
+
+        k_col1, k_col2 = st.columns(2)
+        with k_col1:
+            if st.button("💾 Guardar Key", use_container_width=True):
+                if api_key_input.strip():
+                    db_set_config("gemini_api_key", api_key_input.strip())
+                    st.success("Clave guardada.")
+                    st.rerun()
+                else:
+                    st.warning("Ingrese una clave válida.")
+        with k_col2:
+            if st.button("🗑️ Borrar Key", use_container_width=True):
+                db_delete_config("gemini_api_key")
+                st.info("Clave eliminada.")
+                st.rerun()
+
+        if st.button("🔌 Probar Conexión Gemini Blindado", use_container_width=True):
+            if not api_key_input.strip():
+                st.error("Primero ingrese o guarde su API Key.")
+            else:
+                try:
+                    with st.spinner("Verificando modelos Gemini 3.8..."):
+                        respuesta_test = consultar_gemini_blindado(
+                            api_key_input.strip(),
+                            "Responde únicamente: CONEXION_EXITOSA_BASA13"
+                        )
+                    st.success(f"Activo: {respuesta_test.strip()}")
+                except Exception as e:
+                    st.error(f"Error de conexión: {e}")
+
+        ollama_url = "http://localhost:11434"
+        ollama_model = "llama3.1"
+        if "Ollama" in modo_motor:
+            st.divider()
+            ollama_url = st.text_input("URL Servidor Ollama:", value="http://localhost:11434")
+            ollama_model = st.text_input("Modelo Local:", value="llama3.1")
+            if not ollama_ok:
+                st.warning("Ollama está apagado en Windows (puerto 11434). Si ejecutas ahora, el sistema usará automáticamente el respaldo autónomo sin errores.")
+
+        st.divider()
+        st.header("🗄️ Base de Datos y Fusión")
+        st.caption(f"BD Activa: `{os.path.basename(DB_PATH)}`")
+        if st.button("🧹 Limpiar BD (Dejar en 0 para Producción)", type="primary", use_container_width=True):
+            purgados = reset_clean_database(keep_api_key=True)
+            st.session_state.pop("active_audit_id", None)
+            st.success(f"BD limpia y compactada (0 registros de análisis). Purgados: {sum(purgados.values())}")
+            st.rerun()
+
+        db_sec_file = st.file_uploader("Fusionar BD SQLite secundaria (.db):", type=["db", "sqlite", "sqlite3"], key="db_merger")
+        if db_sec_file is not None and st.button("🔗 Ejecutar Fusión hacia BD Principal", use_container_width=True):
+            os.makedirs(os.path.join(BASE_DIR, "temp_uploads"), exist_ok=True)
+            ruta_temp = os.path.join(BASE_DIR, "temp_uploads", db_sec_file.name)
+            with open(ruta_temp, "wb") as f:
+                f.write(db_sec_file.getbuffer())
+            res_fus = fusionar_base_datos_secundaria(ruta_temp)
+            st.success("Fusión completada.")
+            st.json(res_fus)
+            st.rerun()
+
+    tab1, tab2, tab3 = st.tabs([
+        "📤 1. Cargar y Extraer Informe Real",
+        "📝 2. Matriz Íntegra Editable y Exportación",
+        "📚 3. Histórico (Editar, Guardar, Borrar y Exportar)"
+    ])
+
+    # TAB 1: CARGA Y EXTRACCIÓN 100% REAL
+    with tab1:
+        st.subheader("Cargar Informe de Auditoría (Se actualiza 100% con el contenido real cargado)")
+        uploaded = st.file_uploader(
+            "Seleccione archivo (DOCX, PDF, XLSX, CSV, TXT, MD):",
+            type=["docx", "pdf", "xlsx", "xls", "csv", "txt", "md"]
+        )
+        if uploaded:
+            file_bytes = uploaded.getvalue()
+            sha256_hash = compute_sha256(file_bytes)
+            st.info(f"**Archivo:** `{uploaded.name}` | **Motor:** `{modo_motor}` | **SHA-256:** `{sha256_hash}`")
+            if st.button("🚀 Extraer 100% Todos los Hallazgos Íntegramente y Guardar en BD", type="primary"):
+                with st.spinner("Escaneando esquema multinivel XML, tablas y párrafos completos..."):
+                    records, meta_doc = extract_structured_lines(uploaded.name, file_bytes)
+                    findings = segment_findings_from_records(records)
+                if not findings:
+                    st.error("No se detectaron códigos de hallazgo válidos (ej. 3.01, 3.1.01, 3.4.1) en el documento.")
+                else:
+                    df_res, motor_usado_real = analyze_findings_pipeline(
+                        findings,
+                        motor_seleccionado=modo_motor,
+                        gemini_api_key=api_key_input.strip(),
+                        ollama_url=ollama_url,
+                        ollama_model=ollama_model
+                    )
+                    audit_id = db_save_audit(uploaded.name, sha256_hash, motor_usado_real, meta_doc, df_res)
+                    st.session_state["active_audit_id"] = audit_id
+                    st.success(f"✅ Se extrajeron **{len(findings)} hallazgos íntegros** ({meta_doc}) con `{motor_usado_real}` y se guardaron en BD con ID #{audit_id}. Pase a la Pestaña 2.")
+
+                    with st.expander("📋 Vista previa rápida de códigos extraídos", expanded=True):
+                        st.dataframe(df_res[["Sección", "Código", "Hallazgo actual", "Puntaje 0–10", "Clasificación", "Ubicación"]], use_container_width=True)
+
+    # TAB 2: EDITOR CRUD + EXPORTACIÓN DIRECTA
+    with tab2:
+        audits_df = db_list_audits()
+        if audits_df.empty:
+            st.info("Base de datos limpia en estado de producción (0 análisis pendientes). Cargue un informe en la Pestaña 1 para comenzar.")
+        else:
+            options = {f"#{r['ID']} | {r['Archivo']} ({r['Hallazgos']} hallazgos - Prom: {r['Promedio']}/10)": r for _, r in audits_df.iterrows()}
+            default_idx = 0
+            if "active_audit_id" in st.session_state:
+                for i, (_, r) in enumerate(options.items()):
+                    if int(r["ID"]) == st.session_state["active_audit_id"]:
+                        default_idx = i
+                        break
+
+            sel_label = st.selectbox("Seleccione Entidad / Informe Activo:", list(options.keys()), index=default_idx)
+            sel_row = options[sel_label]
+            aid = int(sel_row["ID"])
+            st.session_state["active_audit_id"] = aid
+
+            df_h = db_load_hallazgos(aid)
+
+            meta_dict = {"archivo": sel_row["Archivo"], "sha256": sel_row["SHA256_Full"]}
+            b1, b2, b3 = st.columns(3)
+            with b1:
+                st.download_button(
+                    "📊 Exportar Matriz Íntegra a Excel (.xlsx)",
+                    data=export_to_excel_bytes(df_h, meta_dict),
+                    file_name=f"BASA13_Matriz_Integra_ID{aid}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+            with b2:
+                st.download_button(
+                    "📄 Exportar Informe a Word (.docx)",
+                    data=export_to_word_bytes(df_h, meta_dict),
+                    file_name=f"BASA13_Informe_Integro_ID{aid}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True
+                )
+            with b3:
+                st.download_button(
+                    "📑 Exportar Datos a CSV (.csv)",
+                    data=df_h.drop(columns=["ID_BD"], errors="ignore").to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"BASA13_Hallazgos_ID{aid}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+
+            st.divider()
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total Hallazgos Extraídos", len(df_h))
+            c2.metric("Verificados", int(df_h["Verificado"].sum()) if not df_h.empty else 0)
+            c3.metric("Promedio Puntaje", f"{df_h['Puntaje 0–10'].mean():.2f}/10" if not df_h.empty else "0.0")
+            c4.metric("Conservar", int((df_h["Clasificación"] == "CONSERVAR").sum()) if not df_h.empty else 0)
+
+            edited_df = st.data_editor(
+                df_h,
+                num_rows="dynamic",
+                use_container_width=True,
+                height=440,
+                column_config={
+                    "ID_BD": st.column_config.NumberColumn("ID", disabled=True),
+                    "Verificado": st.column_config.CheckboxColumn("Verificado", default=False),
+                    "Puntaje 0–10": st.column_config.NumberColumn("Puntaje", min_value=0.0, max_value=10.0, step=0.5),
+                    "Clasificación": st.column_config.SelectboxColumn("Clasificación", options=["CONSERVAR", "MEJORAR", "CONSOLIDAR", "ELIMINAR"])
+                },
+                key=f"editor_main_{aid}"
+            )
+
+            col_s1, col_s2, col_s3 = st.columns(3)
+            with col_s1:
+                if st.button("💾 Guardar Cambios en BD", type="primary", use_container_width=True):
+                    db_update_hallazgos_bulk(aid, edited_df, "EN REVISIÓN")
+                    st.success("✅ Cambios guardados en SQLite.")
+                    st.rerun()
+            with col_s2:
+                if st.button("✅ Verificar Todos y Guardar", use_container_width=True):
+                    edited_df["Verificado"] = True
+                    db_update_hallazgos_bulk(aid, edited_df, "VERIFICADA")
+                    st.success("✅ Auditoría marcada como 100% verificada.")
+                    st.rerun()
+            with col_s3:
+                if st.button("🗑️ Eliminar Auditoría", use_container_width=True):
+                    db_delete_audit(aid)
+                    st.session_state.pop("active_audit_id", None)
+                    st.warning("Auditoría eliminada.")
+                    st.rerun()
+
+    # TAB 3: HISTÓRICO COMPLETO (EDITAR, VERIFICAR, GUARDAR, BORRAR Y EXPORTAR)
+    with tab3:
+        st.subheader("📚 Histórico de Entidades e Informes Evaluados (Gestión CRUD Completa)")
+        hist = db_list_audits()
+        if hist.empty:
+            st.info("Sin registros históricos (Base de datos limpia en 0).")
+        else:
+            st.dataframe(hist.drop(columns=["SHA256_Full"]), use_container_width=True)
+
+            st.divider()
+            st.markdown("### 🛠️ Gestionar Registro Seleccionado del Histórico (Editar, Guardar, Borrar o Exportar)")
+
+            hist_options = {
+                f"ID #{r['ID']} — {r['Archivo']} | Estado: {r['Estado']} | Hallazgos: {r['Hallazgos']}": r
+                for _, r in hist.iterrows()
+            }
+            sel_hist_label = st.selectbox("Seleccione el registro histórico a gestionar:", list(hist_options.keys()), key="hist_selector")
+            h_meta = hist_options[sel_hist_label]
+            h_id = int(h_meta["ID"])
+
+            col_m1, col_m2 = st.columns([2, 1])
+            with col_m1:
+                edit_nombre = st.text_input("Nombre del Archivo / Entidad Auditada:", value=h_meta["Archivo"], key=f"h_name_{h_id}")
+            with col_m2:
+                estados_lista = ["EN REVISIÓN", "VERIFICADA", "APROBADA SUPERVISIÓN", "ARCHIVADA"]
+                idx_est = estados_lista.index(h_meta["Estado"]) if h_meta["Estado"] in estados_lista else 0
+                edit_estado = st.selectbox("Estado del Informe:", estados_lista, index=idx_est, key=f"h_est_{h_id}")
+
+            edit_obs = st.text_area("Notas / Observaciones de Supervisión del Informe:", value=h_meta["Observaciones"], height=80, key=f"h_obs_{h_id}")
+
+            act1, act2, act3 = st.columns(3)
+            with act1:
+                if st.button("💾 Guardar Cambios del Histórico", type="primary", use_container_width=True, key=f"btn_save_hist_{h_id}"):
+                    db_update_audit_metadata(h_id, edit_nombre, edit_estado, edit_obs)
+                    st.success(f"✅ Metadatos del registro ID #{h_id} actualizados.")
+                    st.rerun()
+            with act2:
+                if st.button("📂 Abrir en Editor de Hallazgos (Pestaña 2)", use_container_width=True, key=f"btn_open_hist_{h_id}"):
+                    st.session_state["active_audit_id"] = h_id
+                    st.info(f"Registro ID #{h_id} cargado como activo. Haga clic en la Pestaña 2 arriba para editar sus hallazgos.")
+            with act3:
+                if st.button("🗑️ Borrar Registro del Histórico", use_container_width=True, key=f"btn_del_hist_{h_id}"):
+                    db_delete_audit(h_id)
+                    if st.session_state.get("active_audit_id") == h_id:
+                        st.session_state.pop("active_audit_id", None)
+                    st.warning(f"Registro ID #{h_id} eliminado permanentemente de la base de datos.")
+                    st.rerun()
+
+            st.divider()
+            st.markdown("#### ✏️ Edición Rápida de los Hallazgos de este Registro Histórico")
+            df_hist_hallazgos = db_load_hallazgos(h_id)
+            edited_hist_df = st.data_editor(
+                df_hist_hallazgos,
+                num_rows="dynamic",
+                use_container_width=True,
+                height=340,
+                column_config={
+                    "ID_BD": st.column_config.NumberColumn("ID", disabled=True),
+                    "Verificado": st.column_config.CheckboxColumn("Verificado", default=False),
+                    "Puntaje 0–10": st.column_config.NumberColumn("Puntaje", min_value=0.0, max_value=10.0, step=0.5),
+                    "Clasificación": st.column_config.SelectboxColumn("Clasificación", options=["CONSERVAR", "MEJORAR", "CONSOLIDAR", "ELIMINAR"])
+                },
+                key=f"editor_hist_inline_{h_id}"
+            )
+
+            ex1, ex2, ex3, ex4 = st.columns(4)
+            with ex1:
+                if st.button("💾 Guardar Hallazgos Editados", use_container_width=True, key=f"save_inline_{h_id}"):
+                    db_update_hallazgos_bulk(h_id, edited_hist_df, edit_estado)
+                    st.success("✅ Hallazgos del histórico guardados.")
+                    st.rerun()
+            with ex2:
+                st.download_button(
+                    "📊 Descargar Excel (.xlsx)",
+                    data=export_to_excel_bytes(edited_hist_df, {"archivo": edit_nombre, "sha256": h_meta["SHA256_Full"]}),
+                    file_name=f"BASA13_Historico_ID{h_id}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key=f"dl_xlsx_h_{h_id}"
+                )
+            with ex3:
+                st.download_button(
+                    "📄 Descargar Word (.docx)",
+                    data=export_to_word_bytes(edited_hist_df, {"archivo": edit_nombre, "sha256": h_meta["SHA256_Full"]}),
+                    file_name=f"BASA13_Historico_ID{h_id}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True,
+                    key=f"dl_docx_h_{h_id}"
+                )
+            with ex4:
+                st.download_button(
+                    "📑 Descargar CSV (.csv)",
+                    data=edited_hist_df.drop(columns=["ID_BD"], errors="ignore").to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"BASA13_Historico_ID{h_id}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key=f"dl_csv_h_{h_id}"
+                )
+
+
+if __name__ == "__main__":
+    main()

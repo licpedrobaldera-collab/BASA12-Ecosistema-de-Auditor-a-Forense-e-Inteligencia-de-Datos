@@ -392,12 +392,21 @@ export interface StepGuideResponse {
   siguientePasoMensaje: string;
 }
 
+export interface BitacoraEntry {
+  id: string;
+  operacion: string;
+  detalle: string;
+  fecha: string;
+}
+
 export interface CaseSession {
   id: string;
   codigoCaso?: string;
   nombreCaso: string;
   sessionOwnerId?: string;
   estado?: 'EN_PROCESO' | 'DICTAMEN_EMITIDO' | 'CERRADO';
+  estadoRevision?: 'EN REVISIÓN' | 'VERIFICADA' | 'APROBADA SUPERVISIÓN' | 'ARCHIVADA';
+  observacionesGenerales?: string;
   timestamp: string;
   updatedAt?: string;
   raizCaso: string;

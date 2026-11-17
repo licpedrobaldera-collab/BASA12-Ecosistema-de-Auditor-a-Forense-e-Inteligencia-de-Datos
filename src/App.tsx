@@ -39,7 +39,10 @@ import { ObservationEvaluatorSection } from './components/ObservationEvaluatorSe
 import { UserProfileAndScopeModal } from './components/UserProfileAndScopeModal';
 import { TraceabilityTimelineModal } from './components/TraceabilityTimelineModal';
 import { EntitySwitcherBar } from './components/EntitySwitcherBar';
-import { CaseRegistryAndHistorySection } from './components/CaseRegistryAndHistorySection';
+import {
+  CaseRegistryAndHistorySection,
+  CaseReviewStatus,
+} from './components/CaseRegistryAndHistorySection';
 import { ProjectUploadsAndHistoryHub } from './components/ProjectUploadsAndHistoryHub';
 import { CaseScreenViewerModal } from './components/CaseScreenViewerModal';
 import { PaymentCycleSection } from './components/PaymentCycleSection';
@@ -262,6 +265,7 @@ export default function App() {
   const [viewingLegalRef, setViewingLegalRef] = useState<LegalReferenceItem | null>(null);
   const [isSavingCase, setIsSavingCase] = useState(false);
   const [lastSavedMessage, setLastSavedMessage] = useState<string | null>(null);
+  const [bitacoraRefreshTrigger, setBitacoraRefreshTrigger] = useState<number>(0);
 
   // Cases exclusively scoped to the activeEntity
   const entityCases = useMemo(() => {
@@ -657,6 +661,16 @@ export default function App() {
     if (Array.isArray(saved.iterations)) {
       setIterations(saved.iterations);
     }
+    try {
+      await fetch('/api/cases', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(saved),
+      });
+      setBitacoraRefreshTrigger((n) => n + 1);
+    } catch {
+      // Non-blocking Express mirror sync
+    }
     return saved;
   };
 
@@ -749,10 +763,136 @@ export default function App() {
     if (!firebaseUser) return;
     try {
       await deleteProjectCascadeFromFirestore(id, firebaseUser.uid);
+      fetch(`/api/cases/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
+      setBitacoraRefreshTrigger((n) => n + 1);
       logTraceabilityAction('Eliminación de Proyecto', `Se eliminó el proyecto ${id} y sus cargas de Firestore.`, 'SALIDA');
     } catch (err: any) {
       setFirestoreError(err?.message || 'Error eliminando proyecto.');
     }
+  };
+
+  const handleUpdateCaseMetadata = async (
+    id: string,
+    payload: {
+      nombreCaso: string;
+      estadoRevision: CaseReviewStatus;
+      observacionesGenerales: string;
+    }
+  ) => {
+    const mappedEstado: CaseSession['estado'] =
+      payload.estadoRevision === 'ARCHIVADA'
+        ? 'CERRADO'
+        : payload.estadoRevision === 'VERIFICADA' || payload.estadoRevision === 'APROBADA SUPERVISIÓN'
+        ? 'DICTAMEN_EMITIDO'
+        : 'EN_PROCESO';
+
+    const target = allProjects.find((p) => p.id === id);
+
+    await fetch(`/api/cases/${encodeURIComponent(id)}/metadata`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        nombreCaso: payload.nombreCaso,
+        estado: mappedEstado,
+        estadoRevision: payload.estadoRevision,
+        observacionesGenerales: payload.observacionesGenerales,
+        codigoCaso: target?.codigoCaso,
+        entity: target?.entity || activeEntity || undefined,
+      }),
+    });
+
+    if (target && firebaseUser && target.estado !== 'CERRADO') {
+      try {
+        await saveProjectToFirestore(
+          {
+            ...target,
+            nombreCaso: payload.nombreCaso,
+            estado: mappedEstado,
+          },
+          firebaseUser.uid,
+          {
+            recordIteration: true,
+            iterationSummary: `Actualización de metadatos → Estado: ${payload.estadoRevision} | ${payload.observacionesGenerales.slice(0, 120)}`,
+          }
+        );
+      } catch (err: any) {
+        console.warn('Firestore metadata sync warning:', err?.message || err);
+      }
+    }
+
+    setAllProjects((prev) =>
+      prev.map((p) =>
+        p.id === id
+          ? {
+              ...p,
+              nombreCaso: payload.nombreCaso,
+              estado: mappedEstado,
+              estadoRevision: payload.estadoRevision,
+              observacionesGenerales: payload.observacionesGenerales,
+              updatedAt: new Date().toISOString(),
+            }
+          : p
+      )
+    );
+    if (id === activeCaseId) {
+      setNombreCaso(payload.nombreCaso);
+    }
+    setBitacoraRefreshTrigger((n) => n + 1);
+    setLastSavedMessage(`Metadatos actualizados (${payload.estadoRevision}).`);
+    logTraceabilityAction(
+      'Edición de Metadatos CRUD',
+      `Expediente ${target?.codigoCaso || id} → ${payload.estadoRevision}: ${payload.nombreCaso}`,
+      'SALIDA'
+    );
+  };
+
+  const handleMergeCasesJson = async (
+    importedCases: CaseSession[]
+  ): Promise<{ inserted: number; message: string }> => {
+    const resp = await fetch('/api/cases/merge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        cases: importedCases,
+        entities: activeEntity ? [activeEntity] : [],
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || !data.success) {
+      throw new Error(data.error || 'Error ejecutando la fusión de expedientes.');
+    }
+
+    const mergedList: CaseSession[] = Array.isArray(data.mergedCases) ? data.mergedCases : [];
+    let cloudSaved = 0;
+
+    if (firebaseUser && activeEntity) {
+      for (const mc of mergedList) {
+        try {
+          const firestoreReady: CaseSession = {
+            ...mc,
+            id: `case-merge-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            sessionOwnerId: firebaseUser.uid,
+            estado: mc.resultado ? 'DICTAMEN_EMITIDO' : 'EN_PROCESO',
+            entity: activeEntity,
+          };
+          await saveProjectToFirestore(firestoreReady, firebaseUser.uid, {
+            recordIteration: true,
+            iterationSummary: `Fusión desde paquete JSON: ${firestoreReady.nombreCaso}`,
+          });
+          cloudSaved++;
+        } catch (err: any) {
+          console.warn('Firestore merge sync warning:', err?.message || err);
+        }
+      }
+    }
+
+    setBitacoraRefreshTrigger((n) => n + 1);
+    const msg = `Fusión completada: ${data.insertedCases} expediente(s) integrados en servidor${
+      cloudSaved > 0 ? ` y ${cloudSaved} sincronizado(s) en Firestore bajo ${activeEntity?.siglas}` : ''
+    }.`;
+    setLastSavedMessage(msg);
+    logTraceabilityAction('Fusión de Expedientes (.json)', msg, 'ENTRADA');
+    return { inserted: Number(data.insertedCases) || mergedList.length, message: msg };
   };
 
   const handleDeleteUpload = async (uploadId: string) => {
@@ -1853,6 +1993,9 @@ export default function App() {
                 onSelectCaseToLoad={handleSelectCaseFromHistory}
                 onViewCaseOnScreen={(c) => setViewingCaseOnScreen(c)}
                 onDeleteCase={handleDeleteCase}
+                onUpdateCaseMetadata={handleUpdateCaseMetadata}
+                onMergeCasesJson={handleMergeCasesJson}
+                bitacoraRefreshTrigger={bitacoraRefreshTrigger}
                 isSaving={isSavingCase}
               />
             </div>

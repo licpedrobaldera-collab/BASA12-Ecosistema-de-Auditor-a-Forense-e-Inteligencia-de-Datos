@@ -11,6 +11,7 @@ import mammoth from 'mammoth';
 import { extractText as extractPdfText } from 'unpdf';
 import {
   buildBasaV2FullZipBuffer,
+  buildSampleAuditReportDocxBuffer,
   evaluateFindingDocumentaryV2,
   extractDocxStructuredBlocks,
   reconstructFindingsV2,
@@ -31,6 +32,7 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 const DB_DIR = path.resolve(__dirname, 'forensic_system_db');
 const CASES_DB_FILE = path.join(DB_DIR, 'cases.json');
 const ENTITIES_DB_FILE = path.join(DB_DIR, 'entities.json');
+const BITACORA_DB_FILE = path.join(DB_DIR, 'bitacora.json');
 
 function ensureDbFiles() {
   if (!fs.existsSync(DB_DIR)) {
@@ -41,6 +43,9 @@ function ensureDbFiles() {
   }
   if (!fs.existsSync(ENTITIES_DB_FILE)) {
     fs.writeFileSync(ENTITIES_DB_FILE, JSON.stringify([], null, 2), 'utf-8');
+  }
+  if (!fs.existsSync(BITACORA_DB_FILE)) {
+    fs.writeFileSync(BITACORA_DB_FILE, JSON.stringify([], null, 2), 'utf-8');
   }
 }
 
@@ -57,6 +62,24 @@ function readJsonDb<T>(filePath: string, fallback: T): T {
 function writeJsonDb<T>(filePath: string, data: T): void {
   ensureDbFiles();
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+}
+
+function appendBitacora(operacion: string, detalle: string): void {
+  try {
+    const entries = readJsonDb<Array<{ id: string; operacion: string; detalle: string; fecha: string }>>(
+      BITACORA_DB_FILE,
+      []
+    );
+    const entry = {
+      id: `bit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      operacion: String(operacion || 'OPERACION').slice(0, 120),
+      detalle: String(detalle || '').slice(0, 600),
+      fecha: new Date().toISOString(),
+    };
+    writeJsonDb(BITACORA_DB_FILE, [entry, ...entries].slice(0, 300));
+  } catch (err) {
+    console.warn('appendBitacora warning:', err);
+  }
 }
 
 ensureDbFiles();
@@ -93,35 +116,52 @@ function isTransientAiError(err: any): boolean {
 }
 
 /**
- * Resilient Gemini caller with exponential backoff + model fallback
- * Resolves transient 503 UNAVAILABLE spikes seamlessly.
+ * Resilient Gemini caller with per-attempt timeout + fast model fallback
+ * Prevents slow/unavailable upstream calls from blocking online workflows.
  */
 async function callGeminiWithResilience(
   ai: GoogleGenAI,
   params: Omit<GenerateContentParameters, 'model'>,
-  preferredModels: string[] = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']
+  preferredModels: string[] = [
+    'gemini-3.8-flash',
+    'gemini-4-hydrogen',
+    'gemini-3.8-flash-lite',
+    'gemini-3.1-flash-lite',
+    'gemini-3.8-pro',
+  ]
 ) {
   let lastError: any = null;
 
   for (const model of preferredModels) {
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const response = await ai.models.generateContent({
-          ...params,
-          model,
-        });
+        const timeoutMs = 7500;
+        const response = await Promise.race([
+          ai.models.generateContent({
+            ...params,
+            model,
+          }),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`Timeout (${timeoutMs}ms) on ${model}`)), timeoutMs)
+          ),
+        ]);
         return { response, modelUsed: model };
       } catch (err: any) {
         lastError = err;
         const errMsg = String(err?.message || err || '');
         console.warn(`[Gemini ${model}] attempt ${attempt + 1} failed:`, errMsg);
-        if (errMsg.includes('exceeded your current quota') || errMsg.includes('404') || errMsg.includes('NOT_FOUND')) {
+        if (
+          errMsg.includes('exceeded your current quota') ||
+          errMsg.includes('404') ||
+          errMsg.includes('NOT_FOUND') ||
+          errMsg.includes('Timeout')
+        ) {
           break;
         }
         if (!isTransientAiError(err)) {
           throw err;
         }
-        await sleep(900 * Math.pow(2, attempt));
+        await sleep(500 * Math.pow(2, attempt));
       }
     }
   }
@@ -869,18 +909,157 @@ app.post('/api/cases', (req, res) => {
     else cases.unshift(record);
 
     writeJsonDb(CASES_DB_FILE, cases);
+    appendBitacora(
+      idx >= 0 ? 'ACTUALIZACION_EXPEDIENTE' : 'REGISTRO_EXPEDIENTE',
+      `${record.codigoCaso} — ${record.nombreCaso} (${record.matrizHallazgosLiteral?.length || 0} hallazgos)`
+    );
     res.json({ success: true, caseRecord: record, totalCases: cases.length });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
+app.put('/api/cases/:id/metadata', (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nombreCaso, estado, estadoRevision, observacionesGenerales, codigoCaso, entity } = req.body || {};
+    const cases = readJsonDb<any[]>(CASES_DB_FILE, []);
+    const now = new Date().toISOString();
+    const idx = cases.findIndex((c) => c.id === id);
+
+    if (idx >= 0) {
+      cases[idx] = {
+        ...cases[idx],
+        nombreCaso: typeof nombreCaso === 'string' && nombreCaso.trim() ? nombreCaso.trim() : cases[idx].nombreCaso,
+        estado: estado || cases[idx].estado || 'EN_PROCESO',
+        estadoRevision: estadoRevision || cases[idx].estadoRevision || 'EN REVISIÓN',
+        observacionesGenerales:
+          typeof observacionesGenerales === 'string'
+            ? observacionesGenerales
+            : cases[idx].observacionesGenerales || '',
+        updatedAt: now,
+      };
+      writeJsonDb(CASES_DB_FILE, cases);
+      appendBitacora(
+        'EDICION_METADATOS',
+        `Expediente ${cases[idx].codigoCaso || id} → Estado: ${cases[idx].estadoRevision} | Nombre: ${cases[idx].nombreCaso}`
+      );
+      return res.json({ success: true, caseRecord: cases[idx] });
+    }
+
+    const createdStub = {
+      id,
+      codigoCaso: codigoCaso || `CASO-${new Date().getFullYear()}-001`,
+      nombreCaso: typeof nombreCaso === 'string' && nombreCaso.trim() ? nombreCaso.trim() : 'Expediente Actualizado',
+      estado: estado || 'EN_PROCESO',
+      estadoRevision: estadoRevision || 'EN REVISIÓN',
+      observacionesGenerales: typeof observacionesGenerales === 'string' ? observacionesGenerales : '',
+      timestamp: now,
+      updatedAt: now,
+      entity: entity || undefined,
+    };
+    cases.unshift(createdStub);
+    writeJsonDb(CASES_DB_FILE, cases);
+    appendBitacora(
+      'EDICION_METADATOS',
+      `Expediente ${createdStub.codigoCaso} sincronizado → Estado: ${createdStub.estadoRevision}`
+    );
+    res.json({ success: true, caseRecord: createdStub });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/cases/merge', (req, res) => {
+  try {
+    const incomingCases = Array.isArray(req.body?.cases) ? req.body.cases : [];
+    const incomingEntities = Array.isArray(req.body?.entities) ? req.body.entities : [];
+    if (incomingCases.length === 0) {
+      return res.status(400).json({ success: false, error: 'El paquete JSON no contiene expedientes para fusionar.' });
+    }
+
+    const existingCases = readJsonDb<any[]>(CASES_DB_FILE, []);
+    const existingEntities = readJsonDb<any[]>(ENTITIES_DB_FILE, []);
+    const existingEntityIds = new Set(existingEntities.map((e) => e.id));
+    let insertedEntities = 0;
+
+    for (const rawEnt of incomingEntities) {
+      if (rawEnt && rawEnt.id && rawEnt.nombre && !existingEntityIds.has(rawEnt.id)) {
+        existingEntities.push(rawEnt);
+        existingEntityIds.add(rawEnt.id);
+        insertedEntities++;
+      }
+    }
+
+    const now = new Date().toISOString();
+    const existingCaseIds = new Set(existingCases.map((c) => c.id));
+    const mergedRecords: any[] = [];
+    let insertedCases = 0;
+
+    for (let i = 0; i < incomingCases.length; i++) {
+      const src = incomingCases[i];
+      if (!src || typeof src !== 'object') continue;
+      // Strip any accidental secret fields if importing external configs
+      const { apiKey: _k1, api_key: _k2, geminiApiKey: _k3, ...cleanSrc } = src;
+      const baseName = String(cleanSrc.nombreCaso || `Expediente_Importado_${i + 1}`).trim();
+      const targetId =
+        cleanSrc.id && !existingCaseIds.has(cleanSrc.id)
+          ? String(cleanSrc.id)
+          : `case-merge-${Date.now()}-${i}`;
+      existingCaseIds.add(targetId);
+
+      const merged = {
+        ...cleanSrc,
+        id: targetId,
+        codigoCaso: cleanSrc.codigoCaso || `FUSION-${new Date().getFullYear()}-${String(existingCases.length + mergedRecords.length + 1).padStart(3, '0')}`,
+        nombreCaso: baseName.includes('[FUSIÓN]') ? baseName : `${baseName} [FUSIÓN]`,
+        estadoRevision: cleanSrc.estadoRevision || 'EN REVISIÓN',
+        updatedAt: now,
+        timestamp: cleanSrc.timestamp || now,
+      };
+      existingCases.unshift(merged);
+      mergedRecords.push(merged);
+      insertedCases++;
+
+      if (merged.entity?.id && merged.entity?.nombre && !existingEntityIds.has(merged.entity.id)) {
+        existingEntities.push(merged.entity);
+        existingEntityIds.add(merged.entity.id);
+        insertedEntities++;
+      }
+    }
+
+    writeJsonDb(CASES_DB_FILE, existingCases);
+    writeJsonDb(ENTITIES_DB_FILE, existingEntities);
+    appendBitacora(
+      'FUSION_EXPEDIENTES_JSON',
+      `Fusionados ${insertedCases} expediente(s) y ${insertedEntities} entidad(es) sin sobrescribir la BD principal.`
+    );
+
+    res.json({
+      success: true,
+      insertedCases,
+      insertedEntities,
+      mergedCases: mergedRecords,
+      totalCases: existingCases.length,
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message || 'Error fusionando expedientes.' });
+  }
+});
+
+app.get('/api/bitacora', (_req, res) => {
+  const bitacora = readJsonDb<any[]>(BITACORA_DB_FILE, []);
+  res.json({ success: true, bitacora });
+});
+
 app.delete('/api/cases/:id', (req, res) => {
   try {
     const { id } = req.params;
     const cases = readJsonDb<any[]>(CASES_DB_FILE, []);
+    const target = cases.find((c) => c.id === id);
     const filtered = cases.filter((c) => c.id !== id);
     writeJsonDb(CASES_DB_FILE, filtered);
+    appendBitacora('ELIMINACION_EXPEDIENTE', `Eliminado expediente ${target?.codigoCaso || id}`);
     res.json({ success: true, totalCases: filtered.length });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
@@ -936,6 +1115,7 @@ app.delete('/api/entities/:id', (req, res) => {
 app.post('/api/admin/reset-clean', (_req, res) => {
   writeJsonDb(CASES_DB_FILE, []);
   writeJsonDb(ENTITIES_DB_FILE, []);
+  appendBitacora('RESET_LIMPIO_BD', 'Limpieza estructural de base de datos de producción ejecutada.');
   res.json({ success: true, message: 'Base de datos limpiada para producción.' });
 });
 
@@ -2130,10 +2310,58 @@ app.post('/api/forensic/extract-hallazgos-ccrd', async (req, res) => {
     let aiHallazgosUnstructured: any[] = [];
     let modelUsed = 'motor-documental-profesional-v2';
 
+    // Autogestión IA libre/abierta local (Ollama) si existe instancia activa en localhost o OLLAMA_URL
+    const ollamaUrl = (process.env.OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/+$/, '');
+    if (v2Findings.length > 0 && !ai) {
+      try {
+        const probeCtrl = new AbortController();
+        const probeTimer = setTimeout(() => probeCtrl.abort(), 900);
+        const tagsResp = await fetch(`${ollamaUrl}/api/tags`, { signal: probeCtrl.signal });
+        clearTimeout(probeTimer);
+        if (tagsResp.ok) {
+          const tagsJson: any = await tagsResp.json();
+          const availableModels: string[] = Array.isArray(tagsJson?.models)
+            ? tagsJson.models.map((m: any) => String(m?.name || '')).filter(Boolean)
+            : [];
+          const pickedOllama = availableModels[0] || '';
+          if (pickedOllama) {
+            for (const f of v2Findings) {
+              try {
+                const promptOllama = `Revisor Senior CCRD/NOBACI. Analiza la transcripción íntegra de ${f.codigo} sin inventar datos:\n${f.transcripcionIntegra.slice(0, 7500)}\nDevuelve JSON con: condicionLiteral, criterioTexto, comparacion, causa, efecto, riesgoDetalle, evidenciaSoporte, cuantificacion, responsabilidadDetalle, recomendacionSupervisor, deficienciasRedaccion, puntaje0a10, queFaltaPara10, versionMejorada10.`;
+                const genCtrl = new AbortController();
+                const genTimer = setTimeout(() => genCtrl.abort(), 25000);
+                const genResp = await fetch(`${ollamaUrl}/api/generate`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ model: pickedOllama, prompt: promptOllama, stream: false, format: 'json' }),
+                  signal: genCtrl.signal,
+                });
+                clearTimeout(genTimer);
+                if (genResp.ok) {
+                  const genData: any = await genResp.json();
+                  const parsedEv = parseJsonSafe<any>(genData?.response || '{}', {});
+                  if (parsedEv && typeof parsedEv === 'object' && Object.keys(parsedEv).length > 0) {
+                    aiEvaluatedByCode.set(f.codigo.trim().toLowerCase(), parsedEv);
+                    modelUsed = `ollama-local:${pickedOllama} (Autogestionado Libre)`;
+                  }
+                } else {
+                  break; // Circuit-breaker v8.0.0: failover cleanly on HTTP error
+                }
+              } catch {
+                break; // Circuit-breaker v8.0.0: abort remaining Ollama calls immediately on failure
+              }
+            }
+          }
+        }
+      } catch {
+        // Sin Ollama local activo: continúa automáticamente con Motor Documental Profesional V2 sin solicitar claves
+      }
+    }
+
     if (ai && v2Findings.length > 0) {
       try {
-        // Fase 4: Evaluar el HALLAZGO COMPLETO (transcripcionIntegra), en lotes de 4 para evitar truncamiento
-        const BATCH_SIZE = 4;
+        // Fase 4: Evaluar el HALLAZGO COMPLETO (transcripcionIntegra), en lotes de hasta 6 para evitar truncamiento
+        const BATCH_SIZE = 6;
         for (let bStart = 0; bStart < v2Findings.length; bStart += BATCH_SIZE) {
           const batch = v2Findings.slice(bStart, bStart + BATCH_SIZE);
           const payloadBatch = batch.map((f) => ({
@@ -2515,6 +2743,11 @@ Devuelve JSON estricto:
         evidenciaVerificada: 'Listo para revisión previa y emisión de Informe Técnico.',
       },
     ];
+
+    appendBitacora(
+      'AUDITORIA_V2_EXTRACCION',
+      `Entidad: ${entityName} | ${normalized.length} hallazgos evaluados | Motor: ${modelUsed}`
+    );
 
     res.json({
       success: true,
@@ -3294,11 +3527,158 @@ Devuelve JSON estricto:
 });
 
 // =========================================================================
+// PRE-CHECK DE SALUD DE MOTORES IA (v8.0.0-FINAL-PROD — SIN PEDIR CLAVES)
+// =========================================================================
+app.get('/api/forensic/ai-health', async (req, res) => {
+  const probeCloud = req.query.probe === '1' || req.query.probe === 'true';
+  const ollamaUrl = (process.env.OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/+$/, '');
+
+  let ollamaAvailable = false;
+  let ollamaMessage = 'Ollama no detectado en localhost:11434';
+  let ollamaModels: string[] = [];
+
+  try {
+    const resp = await fetch(`${ollamaUrl}/api/tags`, {
+      signal: AbortSignal.timeout(1000),
+    });
+    if (resp.ok) {
+      const data: any = await resp.json();
+      ollamaModels = Array.isArray(data?.models)
+        ? data.models.map((m: any) => String(m?.name || '')).filter(Boolean)
+        : [];
+      if (ollamaModels.length > 0) {
+        ollamaAvailable = true;
+        ollamaMessage = `Ollama local activo (${ollamaModels[0]})`;
+      } else {
+        ollamaMessage = 'Ollama respondió sin modelos instalados';
+      }
+    } else {
+      ollamaMessage = `Ollama respondió HTTP ${resp.status}`;
+    }
+  } catch {
+    ollamaMessage = 'Sin servidor Ollama local (usando cascada Cloud/Documental)';
+  }
+
+  const ai = getAiClient();
+  const activeModels = [
+    'gemini-3.8-flash',
+    'gemini-4-hydrogen',
+    'gemini-3.8-flash-lite',
+    'gemini-3.1-flash-lite',
+    'gemini-3.8-pro',
+  ];
+
+  let cloudConfigured = Boolean(ai);
+  let cloudActive = cloudConfigured;
+  let cloudModelUsed = cloudConfigured ? activeModels[0] : '';
+  let cloudMessage = cloudConfigured
+    ? 'IA Cloud autogestionada configurada en servidor'
+    : 'Sin variable GEMINI_API_KEY en servidor (respaldo local activo)';
+
+  if (ai && probeCloud) {
+    try {
+      const probeRes = await callGeminiWithResilience(
+        ai,
+        {
+          contents: 'Responde brevemente: CONEXION_EXITOSA_BASA13',
+          config: { temperature: 0, maxOutputTokens: 20 },
+        },
+        activeModels
+      );
+      cloudActive = true;
+      cloudModelUsed = probeRes.modelUsed;
+      cloudMessage = `Conectado en vivo con ${probeRes.modelUsed}`;
+    } catch (err: any) {
+      cloudActive = false;
+      cloudMessage = `Cloud en espera / cuota o red (${String(err?.message || 'sin respuesta').slice(0, 80)}) — respaldo autónomo operativo`;
+    }
+  }
+
+  const recommendedMode = ollamaAvailable
+    ? `IA Local Confidencial (${ollamaModels[0]})`
+    : cloudActive
+    ? `IA Cloud Multi-Modelo (${cloudModelUsed || activeModels[0]})`
+    : 'Motor Documental Forense Autónomo (100% Local / Cero Invención)';
+
+  if (probeCloud) {
+    appendBitacora('PRECHECK_MOTORES_IA', `Salud verificada -> Modo activo: ${recommendedMode}`);
+  }
+
+  res.json({
+    success: true,
+    version: 'v8.0.0-FINAL-PROD',
+    recommendedMode,
+    ollama: {
+      available: ollamaAvailable,
+      url: ollamaUrl,
+      models: ollamaModels,
+      message: ollamaMessage,
+    },
+    geminiCloud: {
+      configured: cloudConfigured,
+      active: cloudActive,
+      modelUsed: cloudModelUsed,
+      cascadeModels: activeModels,
+      message: cloudMessage,
+    },
+    documentaryEngine: {
+      active: true,
+      message: 'Motor Documental Forense Autónomo 100% operativo (determinístico, cero invención).',
+    },
+  });
+});
+
+// =========================================================================
+// SAMPLE CONFIGURABLE WORD (.DOCX) AUDIT REPORT GENERATOR & ONLINE PARSER
+// =========================================================================
+app.get('/api/forensic/sample-word-report', async (req, res) => {
+  try {
+    const entityName =
+      typeof req.query.entity === 'string' && req.query.entity.trim()
+        ? req.query.entity.trim()
+        : 'Entidad Pública Modelo (Configuración BASA12)';
+    const format = typeof req.query.format === 'string' ? req.query.format.toLowerCase() : 'docx';
+    const docxBuffer = await buildSampleAuditReportDocxBuffer(entityName);
+    const fileName = 'Informe_Auditoria_Modelo_Configuracion_BASA12.docx';
+
+    if (format === 'json') {
+      const parsed = await parseBufferByType(
+        docxBuffer,
+        fileName,
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+      );
+      return res.json({
+        success: true,
+        fileName,
+        size: docxBuffer.length,
+        base64Data: docxBuffer.toString('base64'),
+        ...parsed,
+      });
+    }
+
+    appendBitacora('DESCARGA_INFORME_MODELO', `Generado Word modelo para: ${entityName} (${format})`);
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.send(docxBuffer);
+  } catch (error: any) {
+    console.error('Error in /api/forensic/sample-word-report:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Error generando el informe modelo Word (.docx).',
+    });
+  }
+});
+
+// =========================================================================
 // DOWNLOAD STANDALONE PYTHON/STREAMLIT PACKAGE: BASA_HALLAZGOS_INTELLIGENCE_PRO_V2_FULL.zip
 // =========================================================================
 app.get('/api/forensic/download-basa-v2-zip', async (_req, res) => {
   try {
     const zipBuffer = await buildBasaV2FullZipBuffer();
+    appendBitacora('DESCARGA_PAQUETE_V2_ZIP', 'Descarga de BASA_HALLAZGOS_INTELLIGENCE_PRO_V2_FULL.zip (v8.0.0-FINAL-PROD)');
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', 'attachment; filename="BASA_HALLAZGOS_INTELLIGENCE_PRO_V2_FULL.zip"');
     res.send(zipBuffer);

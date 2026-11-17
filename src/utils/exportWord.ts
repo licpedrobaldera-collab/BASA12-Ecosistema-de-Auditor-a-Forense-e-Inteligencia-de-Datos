@@ -1,3 +1,4 @@
+import JSZip from 'jszip';
 import {
   ForensicAnalysisResult,
   AuditorProfile,
@@ -706,6 +707,149 @@ export function downloadSupervisorWordReport(params: {
   const a = document.createElement('a');
   a.href = url;
   a.download = `Informe_Supervisor_CCRD_NOBACI_${nombreCaso.replace(/\s+/g, '_')}_${Date.now()}.doc`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function escapeXmlDocx(text: string | undefined): string {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, ' ');
+}
+
+export async function downloadSupervisorDocxReport(params: {
+  nombreCaso: string;
+  entity?: AuditedEntity | null;
+  auditor: AuditorProfile;
+  periodo: AuditPeriodScope;
+  paisNormativa: string;
+  selloDigital: string;
+  hallazgos: HallazgoMatrizLiteral[];
+  duplicidades: DuplicityFinding[];
+  legalLibrary: LegalReferenceItem[];
+  ccrdStages: CcrdStageStatus[];
+  directors: DirectorResponsibility[];
+  paymentCycleRows?: PaymentCycleRow[];
+}) {
+  const {
+    nombreCaso,
+    entity,
+    auditor,
+    periodo,
+    paisNormativa,
+    selloDigital,
+    hallazgos,
+    duplicidades,
+    ccrdStages,
+  } = params;
+
+  const fecha = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const promedioScore =
+    hallazgos.length > 0
+      ? (hallazgos.reduce((acc, h) => acc + (Number(h.puntaje0a10) || 0), 0) / hallazgos.length).toFixed(2)
+      : '0.00';
+
+  const p = (txt: string, style?: 'Heading1' | 'Heading2' | 'Heading3', boldLabel?: string) => {
+    const pPr = style ? `<w:pPr><w:pStyle w:val="${style}"/></w:pPr>` : '';
+    if (boldLabel) {
+      return `<w:p>${pPr}<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">${escapeXmlDocx(boldLabel)}</w:t></w:r><w:r><w:t xml:space="preserve">${escapeXmlDocx(txt)}</w:t></w:r></w:p>`;
+    }
+    return `<w:p>${pPr}<w:r><w:t xml:space="preserve">${escapeXmlDocx(txt)}</w:t></w:r></w:p>`;
+  };
+
+  const blocks: string[] = [
+    p('INFORME DEL SUPERVISOR / REVISOR TÉCNICO — CONTROL DE CALIDAD CCRD & NOBACI', 'Heading1'),
+    p(`${entity?.nombre || 'Entidad Auditada'} (${entity?.siglas || 'N/D'}) — Expediente: ${nombreCaso}`, undefined, 'Entidad y Caso: '),
+    p(`${fecha} | Jurisdicción: ${paisNormativa} | Período: ${periodo.fechaDesde} al ${periodo.fechaHasta}`, undefined, 'Emisión y Alcance: '),
+    p(`${auditor.nombre} (${auditor.cargo}, ID: ${auditor.cedulaId})`, undefined, 'Supervisor Actuante: '),
+    p(`${selloDigital}`, undefined, 'Trazabilidad SHA-256: '),
+    p(`${hallazgos.length} hallazgos 3.01+ | Promedio de Solidez: ${promedioScore}/10.00 | Duplicidades detectadas: ${duplicidades.length}`, undefined, 'Resumen Cuantitativo: '),
+    p('1. Etapas Procesales Verificadas (Ley núm. 18-24)', 'Heading2'),
+    ...ccrdStages.map((s) =>
+      p(` [${s.status}] ${s.evidenciaVerificada}`, undefined, `Etapa ${s.step} — ${s.title}:`)
+    ),
+    p('2. Evaluación Íntegra y Transcripción Textual por Hallazgo', 'Heading2'),
+  ];
+
+  for (const h of hallazgos) {
+    blocks.push(
+      p(`${h.idHallazgo} — ${h.titulo} (${Number(h.puntaje0a10 || 0).toFixed(1)}/10 · ${h.nivelSolidezV2 || h.estado})`, 'Heading3'),
+      p(h.ubicacionExacta || h.referenciaExacta || h.seccionPadre || 'Ubicación documental general', undefined, '• Ubicación y Sección: '),
+      p(h.estadoRecomendado || h.justificacionDecision || h.estado, undefined, '• Decisión / Justificación: '),
+      p(h.condicionLiteral, undefined, '• Condición: '),
+      p(h.criterioTexto, undefined, '• Criterio Normativo: '),
+      p(h.comparacion || 'Contraste condición vs criterio documentado.', undefined, '• Comparación: '),
+      p(h.causa, undefined, '• Causa: '),
+      p(h.efecto, undefined, '• Efecto: '),
+      p(h.riesgoDetalle || h.nivelRiesgo || 'N/D', undefined, '• Riesgo: '),
+      p(h.evidenciaSoporte || h.origenDocumento || 'Expediente', undefined, '• Evidencia y Comunicaciones: '),
+      p(h.cuantificacion || 'No explicitado en el texto', undefined, '• Cuantificación: '),
+      p(h.responsabilidadDetalle || h.responsableArea || 'No explicitado en el texto', undefined, '• Responsabilidad: '),
+      p(h.recomendacionSupervisor, undefined, '• Recomendación Técnica: '),
+      p(h.deficienciasRedaccion || h.queFaltaPara10 || 'Sin deficiencias críticas.', undefined, '• Deficiencias / Qué falta para 10/10: '),
+      p(h.versionMejorada10 || h.planAccionCorrectivo || '', undefined, '• Versión Mejorada 10/10: '),
+      p((h.leyesCitadas || []).map((l) => `${l.norma}${l.articulo ? ` (${l.articulo})` : ''}`).join('; ') || 'Ver cuerpo textual', undefined, '• Referencias Normativas: '),
+      p((h.transcripcionIntegra || h.condicionLiteral || '').slice(0, 28000), undefined, '• Transcripción Íntegra del Informe: ')
+    );
+  }
+
+  const zip = new JSZip();
+  zip.file(
+    '[Content_Types].xml',
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-officedocument.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>`
+  );
+  zip.file(
+    '_rels/.rels',
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`
+  );
+  zip.file(
+    'word/_rels/document.xml.rels',
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`
+  );
+  zip.file(
+    'word/styles.xml',
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:rPr><w:b/><w:sz w:val="32"/><w:color w:val="0F2942"/></w:rPr></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="Heading 2"/><w:rPr><w:b/><w:sz w:val="26"/><w:color w:val="0369A1"/></w:rPr></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="Heading 3"/><w:rPr><w:b/><w:sz w:val="22"/><w:color w:val="1E293B"/></w:rPr></w:style>
+</w:styles>`
+  );
+  zip.file(
+    'word/document.xml',
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    ${blocks.join('\n    ')}
+    <w:sectPr/>
+  </w:body>
+</w:document>`
+  );
+
+  const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `Informe_Supervisor_BASA12_${nombreCaso.replace(/\s+/g, '_')}_${Date.now()}.docx`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);

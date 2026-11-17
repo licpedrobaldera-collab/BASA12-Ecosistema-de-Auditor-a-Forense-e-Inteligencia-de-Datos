@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import JSZip from 'jszip';
 
 export interface DocBlock {
@@ -39,9 +41,27 @@ function extractTextFromWParagraph(xmlPara: string): string {
   return textRuns.join('').replace(/[ \t]+/g, ' ').trim();
 }
 
+function getDocxParagraphMeta(xmlPara: string): { isHeading: boolean; ilvl: number; styleVal: string } {
+  const styleMatch = xmlPara.match(/<w:pStyle\s+w:val=["']([^"']+)["']/i);
+  const styleVal = (styleMatch ? styleMatch[1] : '').toLowerCase();
+  const ilvlMatch = xmlPara.match(/<w:ilvl\s+w:val=["'](\d+)["']/i);
+  const numIdMatch = xmlPara.match(/<w:numId\s+w:val=["'](\d+)["']/i);
+  const ilvl = ilvlMatch ? parseInt(ilvlMatch[1], 10) : -1;
+  const numId = numIdMatch ? numIdMatch[1] : '';
+
+  const isHeading =
+    styleVal.startsWith('heading') ||
+    styleVal.startsWith('titulo') ||
+    styleVal.startsWith('título') ||
+    (ilvl >= 0 && Boolean(numId) && numId !== '0');
+
+  return { isHeading, ilvl, styleVal };
+}
+
 /**
  * FASE 1 DOCX PARSER: Extracts paragraphs [Párrafo N] and tables [Tabla T, Fila R]
- * in exact reading order directly from word/document.xml using JSZip.
+ * in exact reading order directly from word/document.xml using JSZip,
+ * reconstructing Word XML multilevel automatic numbering (<w:numPr> / Heading 1-3).
  */
 export async function extractDocxStructuredBlocks(buffer: Buffer): Promise<{
   taggedText: string;
@@ -59,6 +79,10 @@ export async function extractDocxStructuredBlocks(buffer: Buffer): Promise<{
   const blocks: DocBlock[] = [];
   let paragraphIdx = 0;
   let tableIdx = 0;
+
+  // Multilevel numbering counters: [chapter, section, finding]
+  const counters = [0, 0, 0];
+  let inCap3Auto = false;
 
   // Walk top-level <w:p> and <w:tbl> elements cleanly by scanning tags
   const tokenRegex = /<w:tbl\b[^>]*>[\s\S]*?<\/w:tbl>|<w:p\b[^>]*>[\s\S]*?<\/w:p>/g;
@@ -90,19 +114,188 @@ export async function extractDocxStructuredBlocks(buffer: Buffer): Promise<{
       });
     } else {
       paragraphIdx += 1;
-      const pText = extractTextFromWParagraph(chunk);
-      if (pText) {
-        blocks.push({
-          loc: `Párrafo ${paragraphIdx}`,
-          text: pText,
-          kind: 'paragraph',
-        });
+      let pText = extractTextFromWParagraph(chunk);
+      if (!pText) continue;
+
+      const { isHeading, ilvl, styleVal } = getDocxParagraphMeta(chunk);
+      const explicitCode = pText.match(/^(3(?:\.\d+){1,2})\b/);
+      if (explicitCode) {
+        const parts = explicitCode[1].split('.');
+        counters[0] = parseInt(parts[0], 10);
+        counters[1] = parts.length >= 2 ? parseInt(parts[1], 10) : counters[1];
+        counters[2] = parts.length >= 3 ? parseInt(parts[2], 10) : 0;
+        inCap3Auto = true;
+      } else if (isHeading) {
+        if (
+          /^(?:HALLAZGOS|RESULTADOS\s+DE\s+LA\s+AUDITOR[ÍI]A|OBSERVACIONES)/i.test(pText) &&
+          (ilvl === 0 || ilvl === -1 || styleVal.includes('1'))
+        ) {
+          counters[0] = 3;
+          counters[1] = 0;
+          counters[2] = 0;
+          inCap3Auto = true;
+          pText = `3. ${pText}`;
+        } else if (inCap3Auto) {
+          if (ilvl === 0 || styleVal.includes('heading1') || styleVal.includes('titulo1') || styleVal === '1') {
+            counters[0] += 1;
+            inCap3Auto = false;
+            pText = `${counters[0]}. ${pText}`;
+          } else if (ilvl === 1 || styleVal.includes('heading2') || styleVal.includes('titulo2') || styleVal === '2') {
+            counters[1] += 1;
+            counters[2] = 0;
+            pText = `3.${counters[1]} ${pText}`;
+          } else if (ilvl === 2 || styleVal.includes('heading3') || styleVal.includes('titulo3') || styleVal === '3') {
+            counters[2] += 1;
+            const padded = String(counters[2]).padStart(2, '0');
+            pText = `3.${counters[1]}.${padded} ${pText}`;
+          }
+        }
       }
+
+      blocks.push({
+        loc: `Párrafo ${paragraphIdx}`,
+        text: pText,
+        kind: 'paragraph',
+      });
     }
   }
 
   const taggedText = blocks.map((b) => `[${b.loc}] ${b.text}`).join('\n');
   return { taggedText, blocks };
+}
+
+function escapeXml(str: string): string {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+/**
+ * Generates a realistic, valid .docx configuration/sample audit report
+ * with Heading 1/2/3 styles, automatic Word XML numbering (<w:numPr>),
+ * verbatim Condition/Criteria/Cause/Effect/Evidence/Communications, and embedded tables.
+ * Can be used as an immediate online configuration benchmark and swapped for any real report.
+ */
+export async function buildSampleAuditReportDocxBuffer(entityLabel = 'Entidad Pública Ejemplo (Configuración BASA12)'): Promise<Buffer> {
+  const zip = new JSZip();
+
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>`;
+
+  const rels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`;
+
+  const docRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`;
+
+  const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="Heading 2"/><w:rPr><w:b/><w:sz w:val="26"/></w:rPr></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="Heading 3"/><w:rPr><w:b/><w:sz w:val="22"/></w:rPr></w:style>
+</w:styles>`;
+
+  const p = (text: string, style?: 'Heading1' | 'Heading2' | 'Heading3', numIlvl?: number) => {
+    const pPrParts: string[] = [];
+    if (style) pPrParts.push(`<w:pStyle w:val="${style}"/>`);
+    if (typeof numIlvl === 'number') {
+      pPrParts.push(`<w:numPr><w:ilvl w:val="${numIlvl}"/><w:numId w:val="1"/></w:numPr>`);
+    }
+    const pPr = pPrParts.length ? `<w:pPr>${pPrParts.join('')}</w:pPr>` : '';
+    return `<w:p>${pPr}<w:r><w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r></w:p>`;
+  };
+
+  const tbl = (rows: string[][]) => {
+    const trs = rows
+      .map(
+        (row) =>
+          `<w:tr>${row
+            .map((cell) => `<w:tc><w:p><w:r><w:t xml:space="preserve">${escapeXml(cell)}</w:t></w:r></w:p></w:tc>`)
+            .join('')}</w:tr>`
+      )
+      .join('');
+    return `<w:tbl>${trs}</w:tbl>`;
+  };
+
+  const paragraphsAndTables = [
+    p(`INFORME DE AUDITORÍA E INVESTIGACIÓN ESPECIAL — ${entityLabel}`, 'Heading1'),
+    p('Documento modelo configurable en formato Word (.docx). Puede utilizarse para validar la extracción XML, la matriz 22 columnas, la base de datos y las descargas en Excel/Word, y sustituirse en cualquier momento por otro informe real.'),
+    p('RESULTADOS DE LA AUDITORÍA E INVESTIGACIÓN ESPECIAL', 'Heading1', 0),
+
+    p('3.1 Aspectos Institucionales y de Control Interno', 'Heading2', 1),
+    p('3.1.01 Debilidades en la formalización y aprobación de instrumentos institucionales (POA, PACC y manuales)', 'Heading3', 2),
+    p('Condición: Al examinar una muestra de 14 instrumentos de planificación y control interno correspondientes al período auditado, se evidenció que el Plan Operativo Anual (POA) y tres manuales de procedimientos carecían de firma de aprobación del Titular y fecha cierta de vigencia, operando sin políticas formales actualizadas.'),
+    p('Criterio: Ley núm. 41-08 de Función Pública, Decreto núm. 527-09, Decreto núm. 543-12 y Normas Básicas de Control Interno (NOBACI) emitidas por la Contraloría General de la República, componente Ambiente de Control.'),
+    p('Causa: Debilidad en la supervisión preventiva de la Dirección de Planificación y ausencia de calendario formal de revisión normativa interna.'),
+    p('Efecto: Genera riesgo de ejecución administrativa discrecional, falta de trazabilidad en autorizaciones e incumplimiento del marco NOBACI.'),
+    p('Evidencia y Comunicaciones: Mediante Oficio núm. DP-045-2025 el Encargado de Planificación remitió copias simples sin firma y manifestó en comunicación de descargo que los instrumentos se encontraban en proceso de actualización.'),
+    tbl([
+      ['Instrumento Auditado', 'Estado Documental', 'Impacto / Muestra'],
+      ['Plan Operativo Anual (POA)', 'Sin firma ni sello de aprobación', '100% del presupuesto operativo'],
+      ['Plan Anual de Compras (PACC)', 'Versión preliminar sin fecha', 'RD$12,450,000.00 programados'],
+      ['Manual de Políticas Internas', 'Borrador no oficializado', '3 unidades administrativas'],
+    ]),
+    p('Recomendación: Se recomienda instruir al Titular/MAE y a la Dirección de Planificación a formalizar, firmar y aprobar mediante resolución interna los instrumentos POA, PACC y manuales de políticas dentro de un plazo de 30 días calendario.'),
+
+    // Auto-numbered Heading 3 WITHOUT literal "3.1.02" prefix in <w:t> to test XML w:numPr reconstruction!
+    p('Inconsistencias en el registro y custodia de expedientes de compras menores sin PACC actualizado', 'Heading3', 2),
+    p('Condición: De un universo de 28 expedientes de compras menores por RD$4,850,200.00, se verificó en 9 procesos la ausencia de constancia de disponibilidad presupuestaria previa y actas de adjudicación debidamente firmadas por el Comité de Compras.'),
+    p('Criterio: Ley núm. 340-06 sobre Compras y Contrataciones Públicas, Artículos 15 y 21, y su Reglamento de Aplicación aprobado mediante Decreto núm. 543-12.'),
+    p('Causa: Falta de verificación previa en la Unidad Operativa de Compras y Contrataciones antes de emitir órdenes de compra.'),
+    p('Efecto: Exposición a nulidad contractual, pagos sin soporte competitivo completo y observación recurrente bajo la Ley núm. 18-24.'),
+    p('Evidencia: Expedientes CM-2025-011 al CM-2025-019 verificados en tabla adjunta.'),
+    p('Recomendación: Instruir a la Dirección Administrativa y Financiera y al Encargado de Compras implementar lista de cotejo obligatoria vinculada al PACC antes de comprometer fondos públicos.'),
+
+    p('3.2 Gestión Financiera, Presupuestaria y Ciclo de Pagos', 'Heading2', 1),
+    p('3.2.01 Egresos ejecutados con documentación justificativa incompleta en el ciclo de pagos', 'Heading3', 2),
+    p('Condición: Se verificaron 6 libramientos de pago ascendentes a RD$1,925,400.00 sin informes de recepción conforme ni facturas con comprobante fiscal válido anexado al expediente original.'),
+    p('Evidencia: Ver libramientos SP-104, SP-118 y SP-142 en los registros de Tesorería.'),
+
+    p('3.3 Gestión de Recursos Humanos', 'Heading2', 1),
+    p('3.3.01 Expedientes de personal sin evaluación de desempeño ni certificación de inducción conforme a la Ley 41-08', 'Heading3', 2),
+    p('Condición: Al revisar 25 expedientes de servidores públicos incorporados en el período, el 40% carecía de formulario de evaluación anual de desempeño y constancia de declaración jurada cuando aplicaba.'),
+    p('Criterio: Ley núm. 41-08 de Función Pública y Decreto núm. 523-09 sobre Relaciones Laborales en la Administración Pública.'),
+    p('Causa: Omisión de seguimiento periódico por parte del Departamento de Recursos Humanos.'),
+    p('Efecto: Dificulta la medición objetiva de méritos y cumplimiento del régimen ético y disciplinario.'),
+    p('Recomendación: Instruir a la Dirección de Recursos Humanos completar y digitalizar el 100% de los expedientes del personal activo.'),
+
+    p('3.4 Tecnología y Transparencia', 'Heading2', 1),
+    p('3.4.1 Desactualización de publicaciones obligatorias en el Portal de Transparencia Institucional', 'Heading3', 2),
+    p('Condición: A la fecha de corte de la auditoría, los apartados de nómina mensual y estados financieros trimestrales en el portal web mostraban atraso de cuatro (4) meses respecto al calendario legal vigente.'),
+    p('Criterio: Ley General de Libre Acceso a la Información Pública núm. 200-04 y Normas Básicas de Control Interno (NOBACI) sobre Información y Comunicación.'),
+    p('Causa: Ausencia de protocolo mensual de entrega entre Contabilidad, RR. HH. y el Responsable de Acceso a la Información (RAI).'),
+    p('Efecto: Disminuye la rendición de cuentas y la calificación institucional en el monitoreo de transparencia.'),
+    p('Recomendación: Instruir al RAI y a las direcciones generadoras de información establecer publicación automatizada antes del día 10 de cada mes.'),
+  ].join('\n');
+
+  const docXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    ${paragraphsAndTables}
+    <w:sectPr/>
+  </w:body>
+</w:document>`;
+
+  zip.file('[Content_Types].xml', contentTypes);
+  zip.file('_rels/.rels', rels);
+  zip.file('word/_rels/document.xml.rels', docRels);
+  zip.file('word/styles.xml', stylesXml);
+  zip.file('word/document.xml', docXml);
+
+  return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
 }
 
 /**
@@ -259,20 +452,26 @@ export function reconstructFindingsV2(rawText: string): {
         continue;
       }
 
-      // Check finding first (e.g. 3.01, 3.1.01, 3.2.03, 3.4.1)
+      // Check finding first (e.g. 3.01, 3.1.01, 3.2.03, 3.4.1) with v8.0.0 length/prose guard
       const fMatch = line.match(FINDING_HEADER_REGEX);
-      if (fMatch && fMatch[2].trim().length >= 5) {
-        flushActive();
-        active = {
-          codigo: fMatch[1].trim(),
-          titulo: fMatch[2].trim().slice(0, 260),
-          seccionPadre: currentSection,
-          ubicacionInicio: blk.loc,
-          ubicacionFin: blk.loc,
-          lines: [line],
-          bloquesContados: 1,
-        };
-        continue;
+      if (fMatch) {
+        const cleanTitle = fMatch[2].trim();
+        const isValidTitle =
+          cleanTitle.length >= 6 &&
+          !(cleanTitle.split(/\s+/).length > 28 && cleanTitle.endsWith('.'));
+        if (isValidTitle) {
+          flushActive();
+          active = {
+            codigo: fMatch[1].trim(),
+            titulo: cleanTitle.slice(0, 260),
+            seccionPadre: currentSection,
+            ubicacionInicio: blk.loc,
+            ubicacionFin: blk.loc,
+            lines: [line],
+            bloquesContados: 1,
+          };
+          continue;
+        }
       }
 
       // Check general section header (3.1, 3.2, 3.3, 3.4) -> strictly section, NEVER standalone finding
@@ -499,637 +698,82 @@ export function evaluateFindingDocumentaryV2(
 
 // =========================================================================
 // GENERADOR OFICIAL DEL PAQUETE STANDALONE: BASA_HALLAZGOS_INTELLIGENCE_PRO_V2_FULL.zip
-// Incluye: Fase 1-4 completas, Matriz 22 columnas, 2 Modos (IA Local Ollama + Motor Documental)
+// Unifica Fases 1-4, Lector XML Word, Fusión SQLite, Bitácora, Heatmap 0-10, CRUD y Exportadores
 // =========================================================================
 export async function buildBasaV2FullZipBuffer(): Promise<Buffer> {
   const zip = new JSZip();
 
-  const appPy = `import io, re, json, hashlib, difflib, unicodedata
-from pathlib import Path
-from datetime import datetime
-import pandas as pd
-import requests
-import streamlit as st
-
-try:
-    from docx import Document
-except Exception:
-    Document = None
-try:
-    from pypdf import PdfReader
-except Exception:
-    PdfReader = None
-
-st.set_page_config(
-    page_title="BASA HALLAZGOS INTELLIGENCE PRO V2 FULL",
-    page_icon="🔎",
-    layout="wide",
-)
-
-VERSION = "2.0.0 FULL"
-APP = "BASA HALLAZGOS INTELLIGENCE PRO — V2 FULL (4 FASES + IA LOCAL)"
-
-
-def norm(s):
-    s = "" if s is None else str(s)
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(c for c in s if not unicodedata.combining(c))
-    return re.sub(r"\\s+", " ", s.lower()).strip()
-
-
-def sha(b):
-    return hashlib.sha256(b).hexdigest()
-
-
-# =========================================================================
-# FASE 1 — EXTRACCIÓN COMPLETA (Párrafos, Tablas, Páginas, Ubicación exacta)
-# =========================================================================
-def extract_docx(b):
-    if Document is None:
-        raise RuntimeError("Instale python-docx.")
-    d = Document(io.BytesIO(b))
-    out = []
-    # Recorrido fiel respetando el orden del cuerpo del documento (párrafos y tablas)
-    p_idx = 0
-    t_idx = 0
-    p_map = {p._element: p for p in d.paragraphs}
-    t_map = {t._element: t for t in d.tables}
-    for child in d.element.body:
-        if child in p_map:
-            p_idx += 1
-            txt = p_map[child].text.strip()
-            if txt:
-                out.append({"loc": f"Párrafo {p_idx}", "text": txt})
-        elif child in t_map:
-            t_idx += 1
-            for ri, row in enumerate(t_map[child].rows, 1):
-                cells = [c.text.strip().replace("\\n", " ") for c in row.cells if c.text.strip()]
-                if cells:
-                    out.append({"loc": f"Tabla {t_idx}, fila {ri}", "text": " | ".join(cells)})
-    return out
-
-
-def extract_pdf(b):
-    if PdfReader is None:
-        raise RuntimeError("Instale pypdf.")
-    r = PdfReader(io.BytesIO(b))
-    out = []
-    for i, page in enumerate(r.pages, 1):
-        txt = (page.extract_text() or "").strip()
-        if txt:
-            out.append({"loc": f"Página {i}", "text": txt})
-    return out
-
-
-def extract_excel(b):
-    x = pd.ExcelFile(io.BytesIO(b))
-    out = []
-    for s in x.sheet_names:
-        d = pd.read_excel(io.BytesIO(b), sheet_name=s, header=None)
-        for i, row in d.iterrows():
-            vals = [str(v).strip() for v in row if pd.notna(v) and str(v).strip()]
-            if vals:
-                out.append({"loc": f"Hoja {s}, fila {i+1}", "text": " | ".join(vals)})
-    return out
-
-
-def extract_document(name, b):
-    e = Path(name).suffix.lower()
-    if e == ".docx":
-        return extract_docx(b)
-    if e == ".pdf":
-        return extract_pdf(b)
-    if e in (".xlsx", ".xls"):
-        return extract_excel(b)
-    if e in (".txt", ".csv", ".md"):
-        return [
-            {"loc": f"Línea {i+1}", "text": x.strip()}
-            for i, x in enumerate(b.decode("utf8", "ignore").splitlines())
-            if x.strip()
-        ]
-    raise ValueError(f"Formato no soportado: {e}")
-
-
-# =========================================================================
-# FASE 2 & FASE 3 — IDENTIFICACIÓN PRECISA (Secciones vs Hallazgos) +
-# TRANSCRIPCIÓN ÍNTEGRA (Encabezado -> literales a,b,c -> condición -> criterio ->
-# evidencia -> comunicaciones -> análisis -> efecto -> recomendación -> sig. hallazgo)
-# =========================================================================
-FINDING_PAT = re.compile(
-    r"^\\s*((?:3\\.0\\d+(?:\\.\\d+)*)|(?:3\\.[1-9]\\d*\\.\\d+(?:\\.\\d+)*)|(?:(?:hallazgo|observaci[oó]n)\\s*(?:n[uú]m\\.?|no\\.?|#)?\\s*\\d+(?:\\.\\d+)*))\\s*[-–—:.)]?\\s+(.+)$",
-    re.I,
-)
-SECTION_PAT = re.compile(
-    r"^\\s*(3\\.[1-9]\\d?)\\s*[-–—:.]?\\s+([A-ZÁÉÍÓÚÑa-záéíóúñ].{3,})$"
-)
-CHAPTER_END_PAT = re.compile(
-    r"^\\s*(?:4\\.\\d*|5\\.\\d*|CAP[ÍI]TULO\\s+(?:IV|V|4|5)|CONCLUSI[ÓO]N\\s+GENERAL|RECOMENDACIONES\\s+GENERALES|ANEXOS?)\\b",
-    re.I,
-)
-
-
-def is_toc_line(line):
-    if re.search(r"\\.{3,}\\s*\\d+\\s*$", line):
-        return True
-    if len(line) < 130 and re.search(r"\\s{4,}\\d{1,3}\\s*$", line):
-        return True
-    return False
-
-
-def extract_normative_citations(text):
-    cites = []
-    seen = set()
-    patterns = [
-        (r"\\bLey(?:\\s+Org[aá]nica|\\s+General)?\\s*(?:n[uú]m\\.?|no\\.?|n[°º])?\\s*\\d{1,4}-\\d{2,4}(?:\\s*,?\\s*art[s]?\\.?\\s*[0-9a-zA-Z,.\\s-]+)?", "Ley"),
-        (r"\\bDecreto\\s*(?:n[uú]m\\.?|no\\.?|n[°º])?\\s*\\d{1,4}-\\d{2,4}(?:\\s*,?\\s*art[s]?\\.?\\s*[0-9a-zA-Z,.\\s-]+)?", "Decreto"),
-        (r"\\b(?:NOBACI|NOBIS)(?:\\s*[A-Z]{2,5}-\\d+(?:-\\d+(?:\\.\\d+)?)?)?", "NOBACI/NOBIS"),
-        (r"\\bResoluci[oó]n\\s*(?:n[uú]m\\.?|no\\.?|n[°º])?\\s*[A-Z0-9.-]+-\\d{2,4}", "Resolución"),
-        (r"\\bConstituci[oó]n\\s+de\\s+la\\s+Rep[uú]blica", "Constitución"),
-        (r"\\b(?:POA|PACC|PEI)\\b", "Instrumento"),
-    ]
-    for pat, _tag in patterns:
-        for m in re.finditer(pat, text, re.I):
-            val = re.sub(r"\\s+", " ", m.group(0)).strip()[:90]
-            k = val.lower()
-            if k not in seen:
-                seen.add(k)
-                cites.append(val)
-    return "; ".join(cites) if cites else "No se detectaron citas normativas explícitas en el texto."
-
-
-def detect_and_reconstruct(blocks):
-    findings_raw = []
-    sections_seen = []
-    current_section = "3.x Resultados de Auditoría"
-    active = None
-
-    def flush():
-        nonlocal active
-        if active:
-            full_text = "\\n".join(active["lines"]).strip()
-            if len(full_text) >= 25:
-                loc = (
-                    active["loc_start"]
-                    if active["loc_start"] == active["loc_end"]
-                    else f'{active["loc_start"]} – {active["loc_end"]}'
-                )
-                findings_raw.append(
-                    {
-                        "codigo": active["codigo"],
-                        "titulo": active["titulo"],
-                        "seccion": active["seccion"],
-                        "loc": loc,
-                        "transcripcion": full_text,
-                        "normas": extract_normative_citations(full_text),
-                    }
-                )
-            active = None
-
-    for b in blocks:
-        for raw_line in b["text"].splitlines():
-            line = raw_line.strip()
-            if not line or is_toc_line(line):
-                continue
-
-            fm = FINDING_PAT.match(line)
-            if fm and len(fm.group(2).strip()) >= 5:
-                flush()
-                active = {
-                    "codigo": fm.group(1).strip(),
-                    "titulo": fm.group(2).strip()[:240],
-                    "seccion": current_section,
-                    "loc_start": b["loc"],
-                    "loc_end": b["loc"],
-                    "lines": [line],
-                }
-                continue
-
-            sm = SECTION_PAT.match(line)
-            if sm and len(sm.group(2).strip()) >= 4 and not re.match(r"^\\d", sm.group(2).strip()):
-                flush()
-                current_section = f"{sm.group(1).strip()} {sm.group(2).strip()[:120]}"
-                sections_seen.append({"codigo": sm.group(1).strip(), "titulo": sm.group(2).strip(), "loc": b["loc"]})
-                continue
-
-            if active and CHAPTER_END_PAT.match(line):
-                flush()
-                continue
-
-            if active:
-                active["lines"].append(line)
-                active["loc_end"] = b["loc"]
-
-    flush()
-
-    # Si un código aparece en índice y cuerpo, conservar el bloque sustancial más extenso
-    grouped = {}
-    for f in findings_raw:
-        grouped.setdefault(f["codigo"], []).append(f)
-    deduped = []
-    for code_items in grouped.values():
-        code_items.sort(key=lambda x: len(x["transcripcion"]), reverse=True)
-        deduped.append(code_items[0])
-
-    return deduped, sections_seen
-
-
-# =========================================================================
-# FASE 4 — EVALUACIÓN IA SOBRE EL HALLAZGO COMPLETO (13 ELEMENTOS)
-# MODO 1: IA LOCAL (Ollama http://localhost:11434 - Confidencial)
-# MODO 2: MOTOR DOCUMENTAL PROFESIONAL (Respaldo Determinístico)
-# =========================================================================
-def evaluate_with_ollama(finding, ollama_url, model_name):
-    prompt = f"""Actúa como Revisor Senior de Control Gubernamental e Investigación Especial (Ley 18-24, NOBACI, ISSAI).
-Evalúa el HALLAZGO COMPLETO transcrito íntegramente a continuación (no evalúes solo el título).
-NO inventes hechos ni normas que no existan en el texto o contexto aplicable.
-
-Sección: {finding['seccion']}
-Código: {finding['codigo']}
-Ubicación: {finding['loc']}
-Transcripción íntegra:
----
-{finding['transcripcion'][:9000]}
----
-
-Devuelve EXCLUSIVAMENTE un objeto JSON válido con estas claves exactas:
-{{
-  "condicion": "¿Qué ocurrió realmente según el texto completo?",
-  "criterio": "¿Qué norma, ley, decreto, NOBACI o procedimiento se incumple?",
-  "comparacion": "¿La condición contradice el criterio? Explica cómo.",
-  "causa": "¿Por qué ocurrió según el texto?",
-  "efecto": "¿Qué consecuencia produjo o produce?",
-  "riesgo": "¿Qué riesgo institucional/financiero/legal genera?",
-  "evidencia": "¿Qué documentos, actas, oficios o comunicaciones sustentan la conclusión?",
-  "cuantificacion": "¿Existe monto, universo, muestra, período o impacto cuantificado?",
-  "responsabilidad": "¿Está correctamente atribuida y sustentada por cargo/área?",
-  "recomendacion_actual": "Recomendación existente en el texto o indicación si falta.",
-  "deficiencias": "Deficiencias de redacción, objetividad o sustentación detectadas.",
-  "solidez_0_10": 8.0,
-  "que_falta_10": "Elementos exactos para alcanzar 10/10.",
-  "version_mejorada_10": "Redacción técnica completa 10/10 lista para informe final."
-}}"""
-
-    resp = requests.post(
-        f"{ollama_url.rstrip('/')}/api/generate",
-        json={"model": model_name, "prompt": prompt, "stream": False, "format": "json"},
-        timeout=90,
-    )
-    resp.raise_for_status()
-    raw = resp.json().get("response", "{}").strip()
-    m = re.search(r"\\{[\\s\\S]*\\}", raw)
-    return json.loads(m.group(0) if m else raw)
-
-
-def evaluate_documentary_motor(finding):
-    full = finding["transcripcion"]
-    t = norm(full)
-
-    has_cond = len(full) >= 160 or any(k in t for k in ["se evidencio", "se verifico", "se observo", "se determino", "ausencia de", "falta de", "inexistencia", "sin firma", "sin fecha"])
-    has_crit = any(k in t for k in ["ley ", "decreto", "resolucion", "nobaci", "nobis", "art.", "articulo", "reglamento", "poa", "pacc", "manual"])
-    has_cause = any(k in t for k in ["causa", "debido a", "originado", "falta de supervision", "ausencia de control", "debilidad"])
-    has_effect = any(k in t for k in ["efecto", "consecuencia", "riesgo", "impacto", "exposicion", "vulnerabilidad", "limita", "afecta"])
-    has_evid = any(k in t for k in ["evidencia", "comunicacion", "oficio", "acta", "expediente", "contrato", "factura", "nomina", "registro", "documento", "tabla", "poa", "pacc"])
-    has_comms = any(k in t for k in ["comunicacion", "descargo", "funcionario", "remitio", "informo", "respuesta"])
-    has_quant = bool(re.search(r"(?:rd\\$|us\\$|\\$|%|universo|muestra|total|\\d{1,3},\\d{3})", t))
-    has_resp = any(k in t for k in ["director", "titular", "mae", "encargado", "responsable", "departamento", "direccion", "unidad", "funcionarios"])
-    has_rec = any(k in t for k in ["recomend", "instruir", "implementar", "establecer", "elaborar", "aprobar", "fortalecer"])
-
-    score = 0.0
-    if has_cond:
-        score += 2.0
-    if has_crit:
-        score += 2.0
-    if has_evid:
-        score += 1.5 if has_comms else 1.0
-    if has_cause:
-        score += 1.0
-    if has_effect:
-        score += 1.0
-    if has_quant:
-        score += 1.0
-    if has_resp:
-        score += 0.5
-    if has_rec:
-        score += 1.0
-    if len(full) > 650:
-        score = min(10.0, score + 0.5)
-    score = round(max(1.0, min(10.0, score)), 1)
-
-    gaps = []
-    if not has_crit:
-        gaps.append("Incorporar criterio normativo puntual (Ley, Decreto, NOBACI aplicable).")
-    if not has_cause:
-        gaps.append("Precisar la causa raíz administrativa u operativa.")
-    if not has_effect:
-        gaps.append("Explicitar el efecto real o riesgo institucional/financiero.")
-    if not has_evid:
-        gaps.append("Detallar documentos, actas o comunicaciones de soporte verificables.")
-    if not has_quant:
-        gaps.append("Cuantificar universo, muestra evaluada, casos o impacto económico.")
-    if not has_resp:
-        gaps.append("Delimitar responsabilidad por cargo, unidad y período.")
-    if not has_rec:
-        gaps.append("Agregar recomendación concreta dirigida al Titular/MAE.")
-
-    lines = [x.strip() for x in full.splitlines()[1:6] if x.strip()]
-    cond_txt = " ".join(lines)[:900] if lines else finding["titulo"]
-
-    return {
-        "condicion": cond_txt,
-        "criterio": finding["normas"],
-        "comparacion": "La condición documentada en el cuerpo del hallazgo contraviene las disposiciones citadas." if (has_cond and has_crit) else "Requiere precisar la confrontación directa entre hecho y norma.",
-        "causa": "Expresada en el desarrollo del hallazgo (debilidad de control, formalización o supervisión)." if has_cause else "Causa raíz no explicitada claramente.",
-        "efecto": "Riesgo operativo, normativo o patrimonial documentado en el acápite." if has_effect else "Efecto material pendiente de especificación.",
-        "riesgo": "Exposición al incumplimiento de control interno y marco legal vigente." if has_crit else "Riesgo probatorio por falta de sustentación normativa completa.",
-        "evidencia": "Sustentado en documentos, registros y comunicaciones citados en la transcripción íntegra." if has_evid else "Evidencia documental insuficiente.",
-        "cuantificacion": "Incluye datos cuantitativos / muestra / período en el texto." if has_quant else "Sin cuantificación explícita.",
-        "responsabilidad": "Áreas o funcionarios vinculados en el texto." if has_resp else "Responsabilidad por unidad/cargo no delimitada.",
-        "recomendacion_actual": "Presente en el texto desarrollado." if has_rec else "No se detecta recomendación explícita.",
-        "deficiencias": " ".join(gaps) if gaps else "Estructura documental consistente con los 13 elementos periciales.",
-        "solidez_0_10": score,
-        "que_falta_10": " ".join(gaps) if gaps else "Validación final de cifras, folios y respuesta institucional.",
-        "version_mejorada_10": (
-            f"{finding['codigo']} {finding['titulo']}. Condición: {cond_txt} "
-            f"Criterio: {finding['normas']} Causa: Deficiencia de control preventivo y supervisión administrativa. "
-            f"Efecto/Riesgo: Vulnerabilidad institucional frente al marco legal aplicable. "
-            f"Evidencia: Según documentación y comunicaciones referidas en {finding['loc']}. "
-            f"Recomendación: Instruir a las unidades competentes a formalizar e implementar controles verificables con seguimiento OAI/MAE."
-        ),
-    }
-
-
-def analyze_all(findings, threshold, mode, ollama_url, ollama_model):
-    rows = []
-    progress = st.progress(0)
-    total = len(findings)
-
-    for i, h in enumerate(findings):
-        progress.progress((i + 1) / max(1, total))
-        used_mode = "Motor Documental Profesional"
-        if mode == "IA Local (Ollama)":
-            try:
-                ev = evaluate_with_ollama(h, ollama_url, ollama_model)
-                used_mode = f"IA Local ({ollama_model})"
-            except Exception as err:
-                st.warning(f"{h['codigo']}: Ollama no respondió ({err}). Aplicando Motor Documental Profesional.")
-                ev = evaluate_documentary_motor(h)
-        else:
-            ev = evaluate_documentary_motor(h)
-
-        s = float(ev.get("solidez_0_10", 5.0))
-        s = round(max(0.0, min(10.0, s)), 1)
-        lev = (
-            "DEFICIENTE"
-            if s <= 3.5
-            else "RECONSTRUIR"
-            if s <= 5.5
-            else "ACEPTABLE CON MEJORAS"
-            if s <= 7.5
-            else "BUENO"
-            if s <= 9.2
-            else "ÓPTIMO"
-        )
-
-        # Duplicidad evaluada sobre título + cuerpo real
-        best = 0.0
-        rel = ""
-        base_txt = norm(f"{h['titulo']} {h['transcripcion'][:1500]}")
-        for j, o in enumerate(findings):
-            if i == j:
-                continue
-            other_txt = norm(f"{o['titulo']} {o['transcripcion'][:1500]}")
-            q = difflib.SequenceMatcher(None, base_txt[:900], other_txt[:900]).ratio()
-            if q > best:
-                best = q
-                rel = o["codigo"]
-
-        status = (
-            "ELIMINAR/CONSOLIDAR — REVISIÓN PROFESIONAL"
-            if best >= threshold
-            else ("RECONSTRUIR" if s <= 4.0 else "MEJORAR" if s <= 7.8 else "CONSERVAR")
-        )
-        justif = (
-            f"Posible duplicidad sustantiva con {rel} ({best:.0%}). Requiere validación profesional."
-            if best >= threshold
-            else f"{status}: Evaluado sobre transcripción íntegra ({len(h['transcripcion'])} chars) mediante {used_mode}."
-        )
-
-        rows.append(
-            {
-                "Código": h["codigo"],
-                "Hallazgo actual": h["titulo"],
-                "Transcripción íntegra": h["transcripcion"],
-                "Condición": ev.get("condicion", ""),
-                "Criterio": ev.get("criterio", ""),
-                "Causa": ev.get("causa", ""),
-                "Efecto": ev.get("efecto", ""),
-                "Riesgo": ev.get("riesgo", ""),
-                "Evidencia": ev.get("evidencia", ""),
-                "Cuantificación": ev.get("cuantificacion", ""),
-                "Responsabilidad": ev.get("responsabilidad", ""),
-                "Recomendación actual": ev.get("recomendacion_actual", ""),
-                "Deficiencias": ev.get("deficiencias", ""),
-                "Duplicidad": round(best, 4),
-                "Hallazgo relacionado": rel,
-                "Justificación de conservar/eliminar/consolidar": justif,
-                "Puntaje 0–10": s,
-                "Nivel": lev,
-                "Qué falta para 10/10": ev.get("que_falta_10", ""),
-                "Versión mejorada 10/10": ev.get("version_mejorada_10", ""),
-                "Referencias normativas": h["normas"],
-                "Ubicación": f"{h['seccion']} | {h['loc']}",
-            }
-        )
-
-    progress.empty()
-    return pd.DataFrame(rows)
-
-
-def to_excel(df, meta):
-    b = io.BytesIO()
-    with pd.ExcelWriter(b, engine="xlsxwriter") as w:
-        df.to_excel(w, index=False, sheet_name="Matriz_22_Columnas")
-        df.groupby("Justificación de conservar/eliminar/consolidar").size().reset_index(name="Cantidad").to_excel(
-            w, index=False, sheet_name="Resumen_Decisiones"
-        )
-        pd.DataFrame([meta]).to_excel(w, index=False, sheet_name="Metodologia_V2")
-        ws = w.sheets["Matriz_22_Columnas"]
-        ws.freeze_panes(1, 0)
-        ws.autofilter(0, 0, len(df), len(df.columns) - 1)
-        for i, c in enumerate(df.columns):
-            max_len = int(df[c].astype(str).map(lambda v: min(len(v), 55)).max()) if len(df) > 0 else 20
-            ws.set_column(i, i, min(max(14, max_len + 2), 55))
-    return b.getvalue()
-
-
-def to_word(df, meta):
-    if Document is None:
-        return None
-    d = Document()
-    d.add_heading(APP, 0)
-    d.add_paragraph(f'Fecha: {meta["fecha"]} | Modo: {meta["modo"]} | SHA-256: {meta["sha256"]}')
-    d.add_heading("Resumen Ejecutivo", 1)
-    d.add_paragraph(
-        f'Archivos: {meta["archivos"]}. Secciones generales detectadas: {meta["secciones"]}. '
-        f'Hallazgos reconstruidos: {len(df)}. Promedio Solidez: {df["Puntaje 0–10"].mean():.2f}/10.'
-    )
-    for _, r in df.iterrows():
-        d.add_heading(f'{r["Código"]} — {r["Hallazgo actual"]} ({r["Puntaje 0–10"]}/10)', 2)
-        for k in [
-            "Ubicación",
-            "Nivel",
-            "Justificación de conservar/eliminar/consolidar",
-            "Condición",
-            "Criterio",
-            "Causa",
-            "Efecto",
-            "Riesgo",
-            "Evidencia",
-            "Cuantificación",
-            "Responsabilidad",
-            "Recomendación actual",
-            "Deficiencias",
-            "Qué falta para 10/10",
-            "Versión mejorada 10/10",
-            "Referencias normativas",
-            "Transcripción íntegra",
-        ]:
-            d.add_paragraph(f"{k}: {r[k]}")
-    b = io.BytesIO()
-    d.save(b)
-    return b.getvalue()
-
-
-# =========================================================================
-# INTERFAZ STREAMLIT V2 FULL
-# =========================================================================
-st.title("🔎 BASA HALLAZGOS INTELLIGENCE PRO V2 FULL")
-st.caption(f"Versión {VERSION} · Extracción 4 Fases + Reconstrucción Íntegra + IA Local Confidencial · basa12-ecosistema")
-
-with st.sidebar:
-    st.header("Configuración V2 Full")
-    eval_mode = st.radio(
-        "Motor de Evaluación (Fase 4)",
-        ["IA Local (Ollama)", "Motor Documental Profesional"],
-        index=0,
-        help="IA Local procesa 100% en su computadora sin enviar el documento fuera. Si Ollama no está activo, respalda el Motor Documental Profesional.",
-    )
-    ollama_url = st.text_input("URL Ollama Local", value="http://localhost:11434")
-    ollama_model = st.text_input("Modelo Ollama", value="llama3.1")
-    threshold = st.slider("Umbral de duplicidad", 0.70, 0.95, 0.82, 0.01)
-    st.info("Encabezados 3.1, 3.2, 3.3, 3.4 se tratan como SECCIONES. Solo 3.01, 3.1.01, 3.2.03, etc. se evalúan como hallazgos íntegros.")
-
-files = st.file_uploader(
-    "Cargar informe(s) de auditoría / investigación especial",
-    type=["docx", "pdf", "xlsx", "xls", "csv", "txt", "md"],
-    accept_multiple_files=True,
-)
-
-if files and st.button("🚀 Ejecutar 4 Fases V2 Full", type="primary"):
-    blocks = []
-    hashes = []
-    errors = []
-    for f in files:
-        b = f.getvalue()
-        hashes.append(f"{f.name}: {sha(b)}")
-        try:
-            blocks += extract_document(f.name, b)
-        except Exception as e:
-            errors.append(f"{f.name}: {e}")
-    for e in errors:
-        st.error(e)
-
-    hs, secs = detect_and_reconstruct(blocks)
-    if not hs:
-        st.error("No se detectaron hallazgos específicos (3.01, 3.1.01, 3.2.03, etc.).")
-    else:
-        df = analyze_all(hs, threshold, eval_mode, ollama_url, ollama_model)
-        meta = {
-            "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "archivos": "; ".join(f.name for f in files),
-            "sha256": " | ".join(hashes),
-            "secciones": len(secs),
-            "modo": eval_mode,
-            "umbral": threshold,
-            "metodologia": "4 Fases V2: Extracción completa -> Secciones vs Hallazgos -> Transcripción íntegra -> Evaluación 13 dimensiones.",
-        }
-        st.session_state.df = df
-        st.session_state.meta = meta
-        st.session_state.secs = secs
-
-if "df" in st.session_state:
-    df = st.session_state.df
-    meta = st.session_state.meta
-    secs = st.session_state.get("secs", [])
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Secciones (3.1, 3.2...)", len(secs))
-    c2.metric("Hallazgos Íntegros", len(df))
-    c3.metric("Solidez Promedio", f'{df["Puntaje 0–10"].mean():.2f}/10')
-    c4.metric("Duplicidades >= Umbral", int((df["Duplicidad"] >= meta["umbral"]).sum()))
-
-    st.dataframe(df, use_container_width=True, height=520)
-
-    for _, r in df.iterrows():
-        with st.expander(f'{r["Código"]} — {r["Hallazgo actual"]} | {r["Puntaje 0–10"]}/10 ({r["Nivel"]})'):
-            st.markdown(f'**Ubicación y Sección:** {r["Ubicación"]}')
-            st.markdown(f'**Referencias normativas detectadas:** {r["Referencias normativas"]}')
-            st.markdown(f'**Condición:** {r["Condición"]}')
-            st.markdown(f'**Criterio:** {r["Criterio"]}')
-            st.markdown(f'**Causa / Efecto / Riesgo:** {r["Causa"]} | {r["Efecto"]} | {r["Riesgo"]}')
-            st.markdown(f'**Evidencia / Cuantificación / Responsabilidad:** {r["Evidencia"]} | {r["Cuantificación"]} | {r["Responsabilidad"]}')
-            st.markdown(f'**Qué falta para 10/10:** {r["Qué falta para 10/10"]}')
-            st.markdown(f'**Versión mejorada 10/10:** {r["Versión mejorada 10/10"]}')
-            st.text_area("Transcripción íntegra completa (Fase 3)", r["Transcripción íntegra"], height=220, key=f'{r["Código"]}_{r["Ubicación"]}')
-
-    x = to_excel(df, meta)
-    csv = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-    w = to_word(df, meta)
-    col_e, col_c, col_w = st.columns(3)
-    col_e.download_button("⬇️ Excel 22 Columnas (.xlsx)", x, "BASA_V2_Matriz_22_Columnas.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    col_c.download_button("⬇️ CSV (.csv)", csv, "BASA_V2_Matriz_22_Columnas.csv", "text/csv")
-    if w:
-        col_w.download_button("⬇️ Informe Word (.docx)", w, "BASA_V2_Informe_Integral.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-`;
-
-  const reqTxt = `streamlit>=1.40,<2
+  let unifiedAppPy = '';
+  let unifiedReqTxt = '';
+  try {
+    unifiedAppPy = fs.readFileSync(path.resolve(process.cwd(), 'app.py'), 'utf-8');
+  } catch {
+    unifiedAppPy = '';
+  }
+  try {
+    unifiedReqTxt = fs.readFileSync(path.resolve(process.cwd(), 'requirements.txt'), 'utf-8');
+  } catch {
+    unifiedReqTxt = '';
+  }
+
+  const reqTxt =
+    unifiedReqTxt.trim() ||
+    `streamlit>=1.40,<2
 pandas>=2.2
-openpyxl>=3.1.5
-xlsxwriter>=3.2
+numpy>=1.26
+requests>=2.31
 python-docx>=1.1
 pypdf>=5
-requests>=2.31
+xlsxwriter>=3.2
+openpyxl>=3.1.5
+scikit-learn>=1.5
+google-genai>=1.0
+plotly>=5.20
 `;
 
-  const readmeMd = `# BASA HALLAZGOS INTELLIGENCE PRO — V2 FULL
+  const appPy = unifiedAppPy.trim()
+    ? unifiedAppPy
+    : `import streamlit as st\nst.error("Archivo app.py unificado no encontrado en el servidor.")\n`;
 
-Paquete oficial V2 integrado en **basa12-ecosistema**.
+  const readmeMd = `# BASA13 HALLAZGOS INTELIGENTE PRO — PAQUETE UNIFICADO DE PRODUCCIÓN (v8.0.0-FINAL-PROD)
 
-## Novedades de la Versión 2.0.0 Full
-1. **Fase 1 — Extracción Completa**: Extrae párrafos y tablas en orden exacto de lectura con su ubicación (\`Párrafo N\`, \`Tabla T, fila R\`, \`Página P\`).
-2. **Fase 2 — Identificación Precisa**: Distingue encabezados generales de sección (\`3.1\`, \`3.2\`, \`3.3\`, \`3.4\`) —tratados exclusivamente como secciones padre— frente a hallazgos reales (\`3.01\`, \`3.1.01\`, \`3.1.02\`, \`3.2.03\`, \`3.4.1\`, etc.), filtrando líneas de índice (TOC).
-3. **Fase 3 — Transcripción Íntegra**: Captura el hallazgo completo desde su encabezado hasta el siguiente hallazgo o sección (literales a., b., c., condición, criterio, evidencia, comunicaciones de funcionarios, análisis, efecto y recomendación).
-4. **Fase 4 — Evaluación de 13 Dimensiones + Matriz de 22 Columnas**:
-   - **Modo 1: IA Local (Ollama)** en \`http://localhost:11434\` — ideal para informes confidenciales (ningún dato sale de su PC).
-   - **Modo 2: Motor Documental Profesional** — respaldo determinístico inmediato cuando no hay un modelo local activo.
+Paquete oficial unificado en **basa12-ecosistema**.
+
+## Capacidades Unificadas (v8.0.0-FINAL-PROD • 10/10 Producción)
+1. **Fase 1 — Extracción XML Multinivel Real**: Extrae párrafos (\`w:outlineLvl\`, \`w:numPr\`, \`Heading 1-4\`) y tablas en orden exacto de lectura con su ubicación (\`Párrafo N\`, \`Tabla #T\`, \`Página P\`).
+2. **Fase 2 — Identificación Precisa + Guardia de Prosa**: Distingue encabezados generales de sección (\`3.1\`, \`3.2\`, \`3.3\`, \`3.4\`) frente a hallazgos reales (\`3.01\`, \`3.1.01\`, \`3.1.02\`, \`3.2.03\`, \`3.4.1\`, etc.), filtrando líneas de índice (TOC) y párrafos narrativos largos.
+3. **Fase 3 — Transcripción Íntegra Textual**: Conserva palabra por palabra el bloque completo de cada hallazgo sin alucinaciones ni frases inventadas.
+4. **Fase 4 — Pre-Check Salud Motores IA + Auto-Cascada con Circuit-Breaker (Sin pedir claves al usuario)**:
+   - **Pre-Check antes de bucles**: Valida \`Ollama\` y \`Gemini\` antes de analizar los hallazgos, evitando errores repetidos por hallazgo (\`WinError 10061\` o \`404\`).
+   - **IA Local Confidencial (Ollama)** en \`http://127.0.0.1:11434\`.
+   - **Gemini API Blindado** mediante variables de entorno/Secrets con rotación automática en modelos activos (\`gemini-3.8-flash\`, \`gemini-4-hydrogen\`, \`gemini-3.8-flash-lite\`, \`gemini-3.1-flash-lite\`, \`gemini-3.8-pro\`).
+   - **Motor Documental Forense Autónomo** como respaldo determinístico inmediato 100% gratuito.
+5. **SQLite CRUD + Limpieza VACUUM + Fusión de Bases Secundarias + Bitácora Forense**:
+   - Limpia y compacta la BD a cero registros de producción.
+   - Permite fusionar bases \`.db/.sqlite\` externas preservando auditorías, hallazgos y trazabilidad.
+   - Incluye Heatmap 0–10 interactivo (Plotly), filtro de severidad crítica, análisis de Ley de Benford y exportación a Excel (\`.xlsx\`), Word (\`.docx\`) y CSV (\`.csv\`).
 `;
 
-  const guiaTxt = `GUÍA RÁPIDA DE USO — BASA HALLAZGOS INTELLIGENCE PRO V2 FULL
-======================================================================
+  const guiaTxt = `GUÍA RÁPIDA DE USO — BASA13 HALLAZGOS INTELIGENTE PRO (UNIFICADO v8.0.0-FINAL-PROD)
+===================================================================================
 
 1. Ejecute INSTALAR_Y_EJECUTAR_WINDOWS.bat (en Windows) o:
    pip install -r requirements.txt
    streamlit run app.py
 
-2. Para usar IA Local confidencial (Recomendado):
-   - Instale Ollama (https://ollama.com) en su equipo.
-   - Ejecute en terminal: ollama pull llama3.1
-   - En la barra lateral del aplicativo elija "IA Local (Ollama)".
+2. Motores de IA Autogestionados y Pre-Check:
+   - En la barra lateral, use "🔌 Verificar Salud de Motores IA" para confirmar
+     el estado de Ollama Local, Gemini Cloud y Motor Documental Forense.
+   - Si instala Ollama (https://ollama.com) y ejecuta "ollama pull llama3.1",
+     el sistema se conecta automáticamente en modo confidencial local.
+   - Si Ollama o Gemini no están disponibles, activa el circuit-breaker y
+     continúa sin interrupciones con el Motor Documental Forense Autónomo.
 
-3. Si no tiene Ollama instalado, seleccione "Motor Documental Profesional".
-
-4. Cargue su informe (.docx, .pdf, .xlsx) y presione "Ejecutar 4 Fases V2 Full".
-   Descargue la Matriz completa de 22 columnas en Excel (.xlsx), CSV o Word (.docx).
+3. Flujo de Trabajo Completo:
+   - Pestaña 1: Cargue su informe (.docx, .pdf, .xlsx, .csv) o ejecute el Ejemplo Word (.docx).
+   - Pestaña 2: Visualice el Heatmap 0–10, filtre severidad crítica, edite y exporte Excel/Word/CSV.
+   - Pestaña 3: Ejecute análisis estadístico de Ley de Benford.
+   - Pestaña 4: Histórico CRUD completo, edición de metadatos, fusión SQLite (VACUUM) y bitácora.
 `;
 
   const batTxt = `@echo off

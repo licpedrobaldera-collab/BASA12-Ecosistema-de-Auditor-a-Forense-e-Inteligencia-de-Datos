@@ -7,6 +7,5 @@ pypdf
 xlsxwriter
 openpyxl
 scikit-learn
-sqlalchemy
 google-genai
 plotly

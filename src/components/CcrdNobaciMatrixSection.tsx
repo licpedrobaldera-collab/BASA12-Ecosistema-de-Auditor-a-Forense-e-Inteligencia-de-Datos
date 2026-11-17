@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ShieldCheck,
   Scale,
@@ -24,9 +24,9 @@ import {
   ChevronDown,
   ChevronUp,
   Flame,
-  Filter,
-  LayoutGrid,
   X,
+  Activity,
+  Cpu,
 } from 'lucide-react';
 import {
   AuditedEntity,
@@ -44,8 +44,14 @@ import {
   PaymentCycleRow,
 } from '../types/forensic';
 import { exportCcrdLiteralMatrixExcel } from '../utils/exportExcel';
-import { downloadSupervisorWordReport } from '../utils/exportWord';
+import { downloadSupervisorDocxReport, downloadSupervisorWordReport } from '../utils/exportWord';
 import { calculateStringSHA256 } from '../utils/crypto';
+import {
+  HeatmapVisualizer,
+  SeverityFilterBand,
+  getHeatmapStyle,
+  getSeverityBand,
+} from './HeatmapVisualizer';
 
 interface Props {
   nombreCaso: string;
@@ -187,9 +193,11 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
   const [evaluatingRowId, setEvaluatingRowId] = useState<string | null>(null);
   const [generatingCcrdRowId, setGeneratingCcrdRowId] = useState<string | null>(null);
   const [downloadingZip, setDownloadingZip] = useState(false);
+  const [loadingSampleWord, setLoadingSampleWord] = useState(false);
+  const [sampleModelNotice, setSampleModelNotice] = useState<string | null>(null);
   const [expandedTranscriptions, setExpandedTranscriptions] = useState<Record<string, boolean>>({});
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [severityFilter, setSeverityFilter] = useState<'ALL' | 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'OPTIMAL'>('ALL');
+  const [severityFilter, setSeverityFilter] = useState<SeverityFilterBand>('ALL');
   const [heatmapSortBySeverity, setHeatmapSortBySeverity] = useState(true);
   const [highlightedHallazgoId, setHighlightedHallazgoId] = useState<string | null>(null);
 
@@ -212,6 +220,37 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
   const [generatingCcrd, setGeneratingCcrd] = useState(false);
   const [copiedCcrd, setCopiedCcrd] = useState(false);
   const [appliedCcrdFeedback, setAppliedCcrdFeedback] = useState<string | null>(null);
+  const [checkingAiHealth, setCheckingAiHealth] = useState(false);
+  const [aiHealth, setAiHealth] = useState<{
+    version: string;
+    recommendedMode: string;
+    ollama: { available: boolean; message: string; models: string[] };
+    geminiCloud: { configured: boolean; active: boolean; modelUsed: string; message: string };
+    documentaryEngine: { active: boolean; message: string };
+  } | null>(null);
+
+  const handleCheckAiHealth = async (probeCloud = true) => {
+    setCheckingAiHealth(true);
+    try {
+      const resp = await fetch(`/api/forensic/ai-health?probe=${probeCloud ? '1' : '0'}`);
+      const data = await resp.json();
+      if (resp.ok && data.success) {
+        setAiHealth(data);
+        if (probeCloud) {
+          onLogAction('Pre-Check Motores IA', `Modo activo verificado: ${data.recommendedMode}`);
+        }
+      }
+    } catch {
+      // Fail gracefully; autonomous documentary engine remains available
+    } finally {
+      setCheckingAiHealth(false);
+    }
+  };
+
+  useEffect(() => {
+    handleCheckAiHealth(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const ccrdWordCount = useMemo(() => {
     const trimmed = ccrdDraftResult.trim();
@@ -247,69 +286,6 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
       blindajeStatus: status,
     };
   }, [hallazgos]);
-
-  const getSeverityBand = (scoreRaw: number): 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'OPTIMAL' => {
-    const score = Number(scoreRaw) || 0;
-    if (score < 5.0) return 'CRITICAL';
-    if (score < 6.5) return 'HIGH';
-    if (score < 8.0) return 'MEDIUM';
-    return 'OPTIMAL';
-  };
-
-  const getHeatmapStyle = (scoreRaw: number) => {
-    const score = Number(scoreRaw) || 0;
-    if (score < 3.0) {
-      return {
-        band: 'CRITICAL' as const,
-        label: 'CRÍTICO EXTREMO',
-        cellClass: 'bg-red-950/85 border-red-500/80 text-red-100 hover:border-red-400 shadow-red-950/50 shadow-md',
-        badgeClass: 'bg-red-600 text-white',
-      };
-    }
-    if (score < 5.0) {
-      return {
-        band: 'CRITICAL' as const,
-        label: 'CRÍTICO',
-        cellClass: 'bg-red-900/45 border-red-500/60 text-red-200 hover:border-red-400',
-        badgeClass: 'bg-red-500/30 text-red-200 border border-red-500/50',
-      };
-    }
-    if (score < 6.5) {
-      return {
-        band: 'HIGH' as const,
-        label: 'ALTO',
-        cellClass: 'bg-orange-950/55 border-orange-500/50 text-orange-100 hover:border-orange-400',
-        badgeClass: 'bg-orange-500/25 text-orange-200 border border-orange-500/45',
-      };
-    }
-    if (score < 8.0) {
-      return {
-        band: 'MEDIUM' as const,
-        label: 'MODERADO',
-        cellClass: 'bg-amber-950/45 border-amber-500/45 text-amber-100 hover:border-amber-400',
-        badgeClass: 'bg-amber-500/20 text-amber-200 border border-amber-500/40',
-      };
-    }
-    return {
-      band: 'OPTIMAL' as const,
-      label: 'ÓPTIMO',
-      cellClass: 'bg-emerald-950/45 border-emerald-500/45 text-emerald-100 hover:border-emerald-400',
-      badgeClass: 'bg-emerald-500/20 text-emerald-200 border border-emerald-500/40',
-    };
-  };
-
-  const { heatmapCounts, heatmapItems } = useMemo(() => {
-    const counts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, OPTIMAL: 0 };
-    hallazgos.forEach((h) => {
-      counts[getSeverityBand(h.puntaje0a10)] += 1;
-    });
-    const sorted = [...hallazgos].sort((a, b) =>
-      heatmapSortBySeverity
-        ? (Number(a.puntaje0a10) || 0) - (Number(b.puntaje0a10) || 0)
-        : 0
-    );
-    return { heatmapCounts: counts, heatmapItems: sorted };
-  }, [hallazgos, heatmapSortBySeverity]);
 
   // Inline draft for adding punctual articles & norms per finding ("Lo que debe ser")
   const [citationDraft, setCitationDraft] = useState<
@@ -358,6 +334,58 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
         'Carga de Áreas Referenciales CCRD',
         `Se incorporaron ${newRows.length} áreas base editables listas para documentar evidencia real sin límite de hallazgos.`
       );
+    }
+  };
+
+  const handleLoadSampleWordReport = async () => {
+    setLoadingSampleWord(true);
+    setErrorMsg(null);
+    setSampleModelNotice(null);
+    try {
+      const entityLabel = activeEntity?.nombre || 'Entidad Pública Modelo (Configuración BASA12)';
+      const sampleResp = await fetch(`/api/forensic/sample-word-report?format=json&entity=${encodeURIComponent(entityLabel)}`);
+      const sampleData = await sampleResp.json();
+      if (!sampleResp.ok || !sampleData.success) {
+        throw new Error(sampleData.error || 'No se pudo generar el informe modelo Word (.docx).');
+      }
+
+      const extractResp = await fetch('/api/forensic/extract-hallazgos-ccrd', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          entityName: entityLabel,
+          paisNormativa,
+          periodo,
+          rawText: sampleData.extractedText,
+          informePreliminarText: sampleData.extractedText,
+          actaLecturaText,
+          recursosCount,
+          replicasCount,
+          contraReplicasCount,
+          directors,
+        }),
+      });
+      const extractData = await extractResp.json();
+      if (!extractResp.ok || !extractData.success) {
+        throw new Error(extractData.error || 'Error ejecutando la auditoría sobre el informe modelo Word.');
+      }
+
+      setHallazgos(extractData.hallazgos || []);
+      if (Array.isArray(extractData.ccrdStages)) {
+        setCcrdStages(extractData.ccrdStages);
+      }
+      setActiveTab('matriz');
+      setSampleModelNotice(
+        `Informe Word modelo "${sampleData.fileName}" procesado en línea (SHA-256: ${String(sampleData.sha256 || '').slice(0, 16)}... · ${(extractData.hallazgos || []).length} hallazgos 3.01+ via ${extractData.modelUsed || 'Motor Autogestionado'}). Puede sustituirlo por cualquier otro archivo en el Paso 2/4.`
+      );
+      onLogAction(
+        'Ejecución Modelo Word (.docx)',
+        `Configurado y procesado informe Word modelo (${(extractData.hallazgos || []).length} hallazgos 3.01+ verificados).`
+      );
+    } catch (err: any) {
+      setErrorMsg(err.message || 'No se pudo procesar el informe modelo Word.');
+    } finally {
+      setLoadingSampleWord(false);
     }
   };
 
@@ -998,6 +1026,52 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
 
           <button
             type="button"
+            onClick={handleLoadSampleWordReport}
+            disabled={loadingSampleWord}
+            title="Genera y ejecuta en línea un informe de auditoría modelo en Word (.docx) para configuración y pruebas, reemplazable luego por cualquier otro informe real"
+            className="px-3 py-2 bg-cyan-600/20 hover:bg-cyan-600/30 disabled:bg-slate-800 text-cyan-200 border border-cyan-500/40 rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+          >
+            {loadingSampleWord ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+            {loadingSampleWord ? 'Procesando Word...' : 'Ejemplo Word (.docx)'}
+          </button>
+
+          <a
+            href="/api/forensic/sample-word-report"
+            download="Informe_Auditoria_Modelo_Configuracion_BASA12.docx"
+            title="Descarga el archivo Word (.docx) de ejemplo para inspeccionarlo, adaptarlo o usarlo como plantilla"
+            className="px-2.5 py-2 bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 rounded-lg text-xs font-semibold flex items-center gap-1"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Plantilla .docx
+          </a>
+
+          <button
+            type="button"
+            onClick={() =>
+              downloadSupervisorDocxReport({
+                nombreCaso,
+                entity: activeEntity,
+                auditor,
+                periodo,
+                paisNormativa,
+                selloDigital,
+                hallazgos,
+                duplicidades,
+                legalLibrary,
+                ccrdStages: stagesToShow,
+                directors,
+                paymentCycleRows,
+              })
+            }
+            className="px-3 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow"
+            title="Genera y descarga el Informe del Supervisor en formato Word nativo (.docx)"
+          >
+            <FileText className="w-3.5 h-3.5" />
+            Word (.docx)
+          </button>
+
+          <button
+            type="button"
             onClick={() =>
               downloadSupervisorWordReport({
                 nombreCaso,
@@ -1015,13 +1089,30 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
               })
             }
             className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-sky-300 border border-sky-500/30 rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-            title="Genera el informe del Supervisor / Revisor sin mención alguna a IA"
+            title="Genera el informe del Supervisor / Revisor en formato clásico (.doc)"
           >
             <FileText className="w-3.5 h-3.5" />
-            Informe Supervisor (.doc)
+            Informe (.doc)
           </button>
         </div>
       </div>
+
+      {sampleModelNotice && (
+        <div className="bg-cyan-950/35 border border-cyan-500/30 rounded-lg p-3 text-xs text-cyan-200 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-cyan-400 shrink-0" />
+            <span>{sampleModelNotice}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSampleModelNotice(null)}
+            className="text-cyan-400 hover:text-cyan-200 cursor-pointer"
+            aria-label="Cerrar aviso"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {errorMsg && (
         <div className="bg-red-950/40 border border-red-800/50 rounded-lg p-3 text-xs text-red-200 flex items-center gap-2">
@@ -1029,6 +1120,51 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
           <span>{errorMsg}</span>
         </div>
       )}
+
+      {/* 0. Pre-Check Salud de Motores IA Autogestionados (v8.0.0-FINAL-PROD — Sin pedir claves) */}
+      <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+        <div className="flex items-start sm:items-center gap-2.5">
+          <div className="w-8 h-8 rounded-lg bg-violet-500/15 border border-violet-500/30 text-violet-300 flex items-center justify-center shrink-0">
+            <Cpu className="w-4 h-4" />
+          </div>
+          <div className="space-y-0.5">
+            <div className="text-xs font-bold text-slate-200 flex items-center gap-2 flex-wrap">
+              <span>Motores Analíticos Autogestionados (Auto-Cascada v8.0.0)</span>
+              {aiHealth && (
+                <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                  Activo: {aiHealth.recommendedMode}
+                </span>
+              )}
+            </div>
+            <div className="text-[11px] text-slate-400 flex flex-wrap gap-x-3 gap-y-1">
+              <span>
+                Cloud Multi-Modelo:{' '}
+                <strong className={aiHealth?.geminiCloud.active ? 'text-emerald-300' : 'text-amber-300'}>
+                  {aiHealth ? aiHealth.geminiCloud.message : 'Verificando...'}
+                </strong>
+              </span>
+              <span>•</span>
+              <span>
+                Ollama Local:{' '}
+                <strong className={aiHealth?.ollama.available ? 'text-emerald-300' : 'text-slate-300'}>
+                  {aiHealth ? aiHealth.ollama.message : 'Comprobando...'}
+                </strong>
+              </span>
+              <span>•</span>
+              <span className="text-sky-300 font-medium">Motor Documental Forense: 100% Operativo</span>
+            </div>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => handleCheckAiHealth(true)}
+          disabled={checkingAiHealth}
+          className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-60 text-violet-200 border border-violet-500/30 rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer shrink-0 self-start lg:self-center"
+        >
+          {checkingAiHealth ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Activity className="w-3.5 h-3.5 text-violet-400" />}
+          {checkingAiHealth ? 'Verificando Motores...' : 'Verificar Salud Motores IA'}
+        </button>
+      </div>
 
       {/* 1. Orden Jerárquico de los Criterios */}
       <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 space-y-2.5">
@@ -1154,153 +1290,33 @@ export const CcrdNobaciMatrixSection: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* 2C. Mapa de Calor (Heatmap) de Severidad Forense por Puntaje 0–10 */}
-      <div className="bg-slate-950/90 border border-slate-800 rounded-xl p-4 space-y-3">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
-          <div>
-            <div className="text-xs font-bold text-slate-100 flex items-center gap-2 flex-wrap">
-              <LayoutGrid className="w-4 h-4 text-rose-400" />
-              Mapa de Calor (Heatmap) de Severidad Forense — Clasificación por Puntaje (0–10)
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-300">
-                Priorización de Revisión
-              </span>
-            </div>
-            <p className="text-[11px] text-slate-400 mt-0.5">
-              Clasifica automáticamente cada hallazgo según su solidez (0.0–4.9 Crítico, 5.0–6.4 Alto, 6.5–7.9 Moderado, 8.0–10.0 Óptimo). Haz clic en una celda para ir al hallazgo o filtra por severidad crítica.
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2 flex-wrap">
-            <button
-              type="button"
-              onClick={() => setHeatmapSortBySeverity((prev) => !prev)}
-              className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border cursor-pointer transition-colors ${
-                heatmapSortBySeverity
-                  ? 'bg-sky-600/20 text-sky-200 border-sky-500/40'
-                  : 'bg-slate-900 text-slate-400 border-slate-700 hover:text-white'
-              }`}
-            >
-              {heatmapSortBySeverity ? 'Orden: Más Críticos Primero (0→10)' : 'Orden: Secuencia del Informe'}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                setSeverityFilter((prev) => (prev === 'CRITICAL' ? 'ALL' : 'CRITICAL'));
-                if (activeTab === 'duplicidades' || activeTab === 'recomendacion_ccrd') {
-                  setActiveTab('matriz');
-                }
-              }}
-              className={`px-3 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1.5 border cursor-pointer transition-all ${
-                severityFilter === 'CRITICAL'
-                  ? 'bg-red-600 text-white border-red-400 shadow-lg shadow-red-950/50'
-                  : 'bg-red-950/40 hover:bg-red-900/50 text-red-200 border-red-500/50'
-              }`}
-            >
-              <Flame className="w-3.5 h-3.5" />
-              {severityFilter === 'CRITICAL'
-                ? `Mostrando Críticos (${heatmapCounts.CRITICAL})`
-                : `Priorizar Severidad Crítica (${heatmapCounts.CRITICAL})`}
-            </button>
-          </div>
-        </div>
-
-        {/* Severity Filter & Scale Legend Strip */}
-        <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-800/80 text-[11px]">
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <span className="text-slate-400 flex items-center gap-1 mr-1">
-              <Filter className="w-3 h-3" /> Filtrar matriz:
-            </span>
-            {[
-              { id: 'ALL', label: `Todos (${hallazgos.length})`, cls: 'border-slate-700 text-slate-300 bg-slate-900', activeCls: 'bg-sky-600 text-white border-sky-400' },
-              { id: 'CRITICAL', label: `Crítico < 5.0 (${heatmapCounts.CRITICAL})`, cls: 'border-red-500/40 text-red-300 bg-red-950/30', activeCls: 'bg-red-600 text-white border-red-400' },
-              { id: 'HIGH', label: `Alto 5.0–6.4 (${heatmapCounts.HIGH})`, cls: 'border-orange-500/40 text-orange-300 bg-orange-950/30', activeCls: 'bg-orange-600 text-white border-orange-400' },
-              { id: 'MEDIUM', label: `Moderado 6.5–7.9 (${heatmapCounts.MEDIUM})`, cls: 'border-amber-500/40 text-amber-300 bg-amber-950/30', activeCls: 'bg-amber-600 text-white border-amber-400' },
-              { id: 'OPTIMAL', label: `Óptimo 8.0–10 (${heatmapCounts.OPTIMAL})`, cls: 'border-emerald-500/40 text-emerald-300 bg-emerald-950/30', activeCls: 'bg-emerald-600 text-white border-emerald-400' },
-            ].map((btn) => (
-              <button
-                key={btn.id}
-                type="button"
-                onClick={() => {
-                  setSeverityFilter(btn.id as typeof severityFilter);
-                  if (activeTab === 'duplicidades' || activeTab === 'recomendacion_ccrd') {
-                    setActiveTab('matriz');
-                  }
-                }}
-                className={`px-2.5 py-1 rounded-md border font-semibold cursor-pointer transition-colors ${
-                  severityFilter === btn.id ? btn.activeCls : `${btn.cls} hover:opacity-90`
-                }`}
-              >
-                {btn.label}
-              </button>
-            ))}
-          </div>
-
-          <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-mono">
-            <span>0.0</span>
-            <span className="w-3.5 h-2.5 rounded-sm bg-red-700 border border-red-400/60" title="0.0–2.9 Crítico Extremo" />
-            <span className="w-3.5 h-2.5 rounded-sm bg-red-500/70 border border-red-400/50" title="3.0–4.9 Crítico" />
-            <span className="w-3.5 h-2.5 rounded-sm bg-orange-500/70 border border-orange-400/50" title="5.0–6.4 Alto" />
-            <span className="w-3.5 h-2.5 rounded-sm bg-amber-500/70 border border-amber-400/50" title="6.5–7.9 Moderado" />
-            <span className="w-3.5 h-2.5 rounded-sm bg-emerald-500/70 border border-emerald-400/50" title="8.0–10.0 Óptimo" />
-            <span>10.0</span>
-          </div>
-        </div>
-
-        {/* Heatmap Cells Grid */}
-        {heatmapItems.length === 0 ? (
-          <div className="text-center py-4 text-[11px] text-slate-500 border border-dashed border-slate-800 rounded-lg">
-            Extraiga o registre hallazgos para visualizar el mapa de calor de severidad 0–10.
-          </div>
-        ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2 max-h-72 overflow-y-auto pr-1">
-            {heatmapItems.map((h) => {
-              const score = Number(h.puntaje0a10) || 0;
-              const style = getHeatmapStyle(score);
-              const isDimmed = severityFilter !== 'ALL' && style.band !== severityFilter;
-              return (
-                <button
-                  key={`hm-${h.id}`}
-                  type="button"
-                  onClick={() => {
-                    if (activeTab !== 'matriz') setActiveTab('matriz');
-                    if (severityFilter !== 'ALL' && style.band !== severityFilter) {
-                      setSeverityFilter('ALL');
-                    }
-                    setHighlightedHallazgoId(h.id);
-                    setTimeout(() => {
-                      document.getElementById(`hallazgo-card-${h.id}`)?.scrollIntoView({
-                        behavior: 'smooth',
-                        block: 'center',
-                      });
-                    }, 80);
-                  }}
-                  title={`${h.idHallazgo} — ${h.titulo} | Puntaje: ${score.toFixed(1)}/10 (${style.label})`}
-                  className={`text-left rounded-lg border p-2.5 transition-all cursor-pointer ${style.cellClass} ${
-                    isDimmed ? 'opacity-30' : 'opacity-100'
-                  } ${highlightedHallazgoId === h.id ? 'ring-2 ring-sky-400' : ''}`}
-                >
-                  <div className="flex items-center justify-between gap-1">
-                    <span className="font-mono font-bold text-[11px] truncate">{h.idHallazgo}</span>
-                    <span className="font-mono font-extrabold text-xs">{score.toFixed(1)}</span>
-                  </div>
-                  <div className="mt-1 text-[10.5px] font-medium leading-tight line-clamp-2 opacity-90">
-                    {h.titulo || 'Sin título'}
-                  </div>
-                  <div className="mt-1.5 flex items-center justify-between gap-1">
-                    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${style.badgeClass}`}>
-                      {style.label}
-                    </span>
-                    {h.esDuplicado && (
-                      <span className="text-[9px] font-bold text-amber-300">DUP</span>
-                    )}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        )}
-      </div>
+      {/* 2C. HeatmapVisualizer — Mapa de Calor de Severidad Forense por Puntaje 0–10 */}
+      <HeatmapVisualizer
+        hallazgos={hallazgos}
+        severityFilter={severityFilter}
+        onSeverityFilterChange={(band) => {
+          setSeverityFilter(band);
+          if (activeTab === 'duplicidades' || activeTab === 'recomendacion_ccrd') {
+            setActiveTab('matriz');
+          }
+        }}
+        sortBySeverity={heatmapSortBySeverity}
+        onToggleSortBySeverity={() => setHeatmapSortBySeverity((prev) => !prev)}
+        highlightedHallazgoId={highlightedHallazgoId}
+        onSelectHallazgo={(h, band) => {
+          if (activeTab !== 'matriz') setActiveTab('matriz');
+          if (severityFilter !== 'ALL' && band !== severityFilter) {
+            setSeverityFilter('ALL');
+          }
+          setHighlightedHallazgoId(h.id);
+          setTimeout(() => {
+            document.getElementById(`hallazgo-card-${h.id}`)?.scrollIntoView({
+              behavior: 'smooth',
+              block: 'center',
+            });
+          }, 80);
+        }}
+      />
 
       {/* 3. Evaluador Situacional Senior CGR / NOBACI / Ley 41-08 / MAP / DGCP */}
       <form
